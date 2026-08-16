@@ -14,6 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  CRATES_IO_USER_AGENT: molpha-verifier-ci (https://github.com/molpha/molpha-verifier)
 
 jobs:
   publish:
@@ -61,15 +62,13 @@ jobs:
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           crate=molpha-verifier
-          has_stable=$(
-            curl -sf "https://crates.io/api/v1/crates/${crate}/versions?per_page=100" \
-              | jq -r '.versions[].num' \
-              | grep -v '-' \
-              | head -1 \
-              || true
+          max_version=$(
+            curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
+              "https://crates.io/api/v1/crates/${crate}" \
+              | jq -r '.crate.max_version // empty'
           )
-          if [ -z "$has_stable" ]; then
-            echo "::error::No stable release on crates.io yet. Publish a release from 'main' before publishing dev prereleases."
+          if [ -z "$max_version" ] || [[ "$max_version" == *-* ]]; then
+            echo "::error::No stable release on crates.io yet (found: '${max_version:-none}'). Publish a release from 'main' before publishing dev prereleases."
             exit 1
           fi
 
@@ -83,7 +82,8 @@ jobs:
           dev_base="${major}.${minor}.$((patch + 1))"
 
           versions=$(
-            curl -sf "https://crates.io/api/v1/crates/${crate}/versions?per_page=100" \
+            curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
+              "https://crates.io/api/v1/crates/${crate}/versions?per_page=100" \
               | jq -r '.versions[].num'
           )
 

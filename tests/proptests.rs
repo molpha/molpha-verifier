@@ -136,7 +136,7 @@ fn arb_data_update() -> impl Strategy<Value = DataUpdate> {
     (
         any::<[u8; 32]>(),
         any::<u32>(),
-        any::<[u8; 32]>(),
+        prop::collection::vec(any::<u8>(), 0..=256),
         any::<i64>(),
         any::<u8>(),
         any::<[u8; 32]>(),
@@ -145,7 +145,7 @@ fn arb_data_update() -> impl Strategy<Value = DataUpdate> {
     )
         .prop_map(
             |(
-                feed_id,
+                source_id,
                 registry_version,
                 value,
                 canonical_timestamp,
@@ -155,7 +155,7 @@ fn arb_data_update() -> impl Strategy<Value = DataUpdate> {
                 signers_bitmap,
             )| {
                 DataUpdate {
-                    feed_id,
+                    source_id,
                     registry_version,
                     value,
                     canonical_timestamp,
@@ -280,7 +280,7 @@ proptest! {
 
     #[test]
     fn derive_selection_bitmap_is_deterministic(
-        feed_id in any::<[u8; 32]>(),
+        source_id in any::<[u8; 32]>(),
         registry_version in any::<u32>(),
         canonical_timestamp in any::<i64>(),
         node_count in 1u32..=64,
@@ -288,7 +288,7 @@ proptest! {
         redundancy_buffer in any::<u8>(),
     ) {
         let a = derive_selection_bitmap(
-            &feed_id,
+            &source_id,
             registry_version,
             canonical_timestamp,
             node_count,
@@ -297,7 +297,7 @@ proptest! {
         )
         .unwrap();
         let b = derive_selection_bitmap(
-            &feed_id,
+            &source_id,
             registry_version,
             canonical_timestamp,
             node_count,

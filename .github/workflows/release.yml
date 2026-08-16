@@ -43,11 +43,13 @@ jobs:
           version=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
           echo "value=${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Check not already published
+      - name: Check publication and tag status
         id: check
         run: |
           crate=molpha-verifier
           version="${{ steps.version.outputs.value }}"
+          tag="v${version}"
+
           if curl -sf "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null; then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "Version ${version} is already on crates.io; skipping publish."
@@ -55,15 +57,24 @@ jobs:
             echo "already_published=false" >> "$GITHUB_OUTPUT"
           fi
 
+          git fetch --tags origin
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${tag} already exists on origin; skipping tag creation."
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to crates.io
         if: steps.check.outputs.already_published != 'true'
         run: cargo publish --locked
 
       - name: Create git tag
-        if: steps.check.outputs.already_published != 'true'
+        if: steps.check.outputs.tag_exists != 'true'
         run: |
           version="${{ steps.version.outputs.value }}"
+          tag="v${version}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${version}" -m "Release v${version}"
-          git push origin "v${version}"
+          git tag -a "${tag}" -m "Release ${tag}"
+          git push origin "${tag}"

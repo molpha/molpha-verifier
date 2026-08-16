@@ -594,7 +594,7 @@ mod tests {
         let coalition = PublicKey::combine(&[p1, p2, p3]).expect("combine");
         let coalition_compressed = coalition.serialize_compressed();
 
-        let feed_id: [u8; 32] = [
+        let source_id: [u8; 32] = [
             0x6a, 0x6f, 0x62, 0x2d, 0x65, 0x78, 0x74, 0x72, 0x61, 0x63, 0x74, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
@@ -617,7 +617,7 @@ mod tests {
 
         let message_hash = hashv(&[
             MESSAGE_PREFIX.as_slice(),
-            feed_id.as_slice(),
+            source_id.as_slice(),
             registry_version.to_be_bytes().as_slice(),
             signatures_required.to_be_bytes().as_slice(),
             signers_bitmap.as_slice(),

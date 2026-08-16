@@ -12,7 +12,7 @@
     derive(borsh::BorshSerialize, borsh::BorshDeserialize)
 )]
 pub struct DataUpdate {
-    pub feed_id: [u8; 32],
+    pub source_id: [u8; 32],
     pub registry_version: u32,
     /// Arbitrary-length payload bytes (hashed as-is into the EVM message).
     pub value: Vec<u8>,

@@ -76,8 +76,8 @@ fn main() -> Result<(), DataUpdateError> {
     let payload = DataUpdate::try_from_slice(&FIXTURE_BORSH).expect("fixture borsh must decode");
 
     println!(
-        "decoded feed_id:        {:?}",
-        ascii_prefix(&payload.feed_id)
+        "decoded source_id:        {:?}",
+        ascii_prefix(&payload.source_id)
     );
     println!("decoded value:          {:?}", ascii_prefix(&payload.value));
     println!("registry_version:       {}", payload.registry_version);

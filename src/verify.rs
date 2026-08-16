@@ -50,7 +50,7 @@ pub fn verify_data_update(
     }
 
     let expected_selection = derive_selection_bitmap(
-        &payload.feed_id,
+        &payload.source_id,
         payload.registry_version,
         payload.canonical_timestamp,
         node_count,
@@ -185,7 +185,7 @@ mod tests {
     // ----------------------------------------------------------------------------------------
 
     /// "solana-compat-job" right-padded to 32 bytes.
-    const FIXTURE_FEED_ID: [u8; 32] = [
+    const FIXTURE_SOURCE_ID: [u8; 32] = [
         0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d, 0x6a,
         0x6f, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00,
@@ -268,7 +268,7 @@ mod tests {
 
     fn fixture_payload() -> DataUpdate {
         DataUpdate {
-            feed_id: FIXTURE_FEED_ID,
+            source_id: FIXTURE_SOURCE_ID,
             registry_version: FIXTURE_REGISTRY_VERSION,
             value: FIXTURE_VALUE.to_vec(),
             canonical_timestamp: FIXTURE_CANONICAL_TIMESTAMP,

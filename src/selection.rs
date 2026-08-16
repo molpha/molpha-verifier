@@ -1,4 +1,4 @@
-//! Deterministic selection-bitmap derivation for a `(feed_id, registry_version, timestamp)` round.
+//! Deterministic selection-bitmap derivation for a `(source_id, registry_version, timestamp)` round.
 
 use solana_keccak_hasher::hashv;
 
@@ -15,10 +15,10 @@ pub const SELECTION_SEED_PREFIX: [u8; 32] = [
 
 /// Derive the deterministic selection bitmap for a round.
 ///
-/// `seed = keccak(SELECTION_SEED_PREFIX, feed_id, registry_version_be, canonical_timestamp_be)`,
+/// `seed = keccak(SELECTION_SEED_PREFIX, source_id, registry_version_be, canonical_timestamp_be)`,
 /// then `derive_group_bitmap(seed, node_count, effective_selection_size(...))`.
 pub fn derive_selection_bitmap(
-    feed_id: &[u8; 32],
+    source_id: &[u8; 32],
     registry_version: u32,
     canonical_timestamp: i64,
     node_count: u32,
@@ -28,7 +28,7 @@ pub fn derive_selection_bitmap(
     let canonical_timestamp_bytes = (canonical_timestamp as u64).to_be_bytes();
     let selection_seed = hashv(&[
         SELECTION_SEED_PREFIX.as_slice(),
-        feed_id.as_ref(),
+        source_id.as_ref(),
         registry_version.to_be_bytes().as_ref(),
         canonical_timestamp_bytes.as_ref(),
     ])

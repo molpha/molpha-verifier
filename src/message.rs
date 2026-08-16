@@ -17,7 +17,7 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
 /// Matches `Validator._constructMessage` in the EVM reference implementation:
 /// ```text
 /// keccak256(abi.encodePacked(
-///     MESSAGE_PREFIX, feedId, registryVersion, signaturesRequired,
+///     MESSAGE_PREFIX, sourceId, registryVersion, signaturesRequired,
 ///     signersBitmap, value, canonicalTimestamp
 /// ))
 /// ```
@@ -31,7 +31,7 @@ pub fn compute_message_hash(payload: &DataUpdate, signatures_required: u8) -> [u
 
     hashv(&[
         MESSAGE_PREFIX.as_slice(),
-        payload.feed_id.as_slice(),
+        payload.source_id.as_slice(),
         registry_version_bytes.as_slice(),
         signatures_required_bytes.as_slice(),
         payload.signers_bitmap.as_slice(),
@@ -48,7 +48,7 @@ mod tests {
     fn fixture_payload() -> DataUpdate {
         DataUpdate {
             // "solana-compat-job" right-padded to 32 bytes.
-            feed_id: [
+            source_id: [
                 0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d,
                 0x6a, 0x6f, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00,
@@ -116,7 +116,7 @@ mod tests {
         assert_ne!(compute_message_hash(&e, e.signatures_required), base_hash);
 
         let mut f = fixture_payload();
-        f.feed_id[0] ^= 0xff;
+        f.source_id[0] ^= 0xff;
         assert_ne!(compute_message_hash(&f, f.signatures_required), base_hash);
     }
 }

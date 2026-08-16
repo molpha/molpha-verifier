@@ -62,13 +62,14 @@ jobs:
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           crate=molpha-verifier
-          max_version=$(
+          # max_version can be a prerelease (e.g. 0.3.1-dev.0); use max_stable_version.
+          max_stable_version=$(
             curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
               "https://crates.io/api/v1/crates/${crate}" \
-              | jq -r '.crate.max_version // empty'
+              | jq -r '.crate.max_stable_version // empty'
           )
-          if [ -z "$max_version" ] || [[ "$max_version" == *-* ]]; then
-            echo "::error::No stable release on crates.io yet (found: '${max_version:-none}'). Publish a release from 'main' before publishing dev prereleases."
+          if [ -z "$max_stable_version" ] || [[ "$max_stable_version" == *-* ]]; then
+            echo "::error::No stable release on crates.io yet (found: '${max_stable_version:-none}'). Publish a release from 'main' before publishing dev prereleases."
             exit 1
           fi
 

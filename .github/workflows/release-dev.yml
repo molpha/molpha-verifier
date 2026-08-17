@@ -62,7 +62,7 @@ jobs:
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           crate=molpha-verifier
-          # max_version can be a prerelease (e.g. 0.3.1-dev.0); use max_stable_version.
+          # max_version can be a prerelease (e.g. 0.3.0-dev.0); use max_stable_version.
           max_stable_version=$(
             curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
               "https://crates.io/api/v1/crates/${crate}" \
@@ -79,8 +79,6 @@ jobs:
         run: |
           crate=molpha-verifier
           base=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2 | sed 's/-.*//')
-          IFS=. read -r major minor patch <<< "$base"
-          dev_base="${major}.${minor}.$((patch + 1))"
 
           versions=$(
             curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
@@ -90,7 +88,7 @@ jobs:
 
           max_dev=-1
           for version in $versions; do
-            if [[ "$version" =~ ^${dev_base}-dev\.([0-9]+)$ ]]; then
+            if [[ "$version" =~ ^${base}-dev\.([0-9]+)$ ]]; then
               n="${BASH_REMATCH[1]}"
               if [ "$n" -gt "$max_dev" ]; then
                 max_dev=$n
@@ -98,7 +96,7 @@ jobs:
             fi
           done
 
-          echo "value=${dev_base}-dev.$((max_dev + 1))" >> "$GITHUB_OUTPUT"
+          echo "value=${base}-dev.$((max_dev + 1))" >> "$GITHUB_OUTPUT"
 
       - name: Set dev version in Cargo.toml
         if: steps.changes.outputs.has_changes == 'true'
@@ -108,4 +106,6 @@ jobs:
 
       - name: Publish dev prerelease to crates.io
         if: steps.changes.outputs.has_changes == 'true'
-        run: cargo publish --locked --allow-dirty
+        run: |
+          cargo generate-lockfile
+          cargo publish --locked --allow-dirty

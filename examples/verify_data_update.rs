@@ -78,8 +78,8 @@ const FIXTURE_SIGNER_PUBKEYS: [[u8; 33]; 8] = [
 
 fn main() -> Result<(), DataUpdateError> {
     // 1. Decode the wire-format payload and aggregate signature (e.g. from instruction args).
-    let payload =
-        DataUpdate::try_from_slice(&FIXTURE_PAYLOAD_BORSH).expect("fixture payload borsh must decode");
+    let payload = DataUpdate::try_from_slice(&FIXTURE_PAYLOAD_BORSH)
+        .expect("fixture payload borsh must decode");
     let signature = SchnorrSignature::try_from_slice(&FIXTURE_SIGNATURE_BORSH)
         .expect("fixture signature borsh must decode");
 

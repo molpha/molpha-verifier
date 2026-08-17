@@ -127,21 +127,21 @@ mod tests {
         let mut d = fixture_payload();
         d.value[0] ^= 0xff;
         assert_ne!(
-            compute_message_hash(&d, signers_bitmap, d.signatures_required),
+            compute_message_hash(&d, fixture_signers_bitmap(), d.signatures_required),
             base_hash
         );
 
         let mut e = fixture_payload();
         e.canonical_timestamp += 1;
         assert_ne!(
-            compute_message_hash(&e, signers_bitmap, e.signatures_required),
+            compute_message_hash(&e, fixture_signers_bitmap(), e.signatures_required),
             base_hash
         );
 
         let mut f = fixture_payload();
         f.source_id[0] ^= 0xff;
         assert_ne!(
-            compute_message_hash(&f, signers_bitmap, f.signatures_required),
+            compute_message_hash(&f, fixture_signers_bitmap(), f.signatures_required),
             base_hash
         );
     }

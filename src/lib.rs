@@ -7,7 +7,7 @@
 //!
 //! # Usage
 //! ```ignore
-//! use molpha_verifier::{verify_data_update, DataUpdate};
+//! use molpha_verifier::{verify_data_update, DataUpdate, SchnorrSignature};
 //!
 //! // `ordered_signers` are the signing nodes' (x, y) pubkeys in ascending signers_bitmap bit order.
 //! verify_data_update(&payload, node_count, redundancy_buffer, &ordered_signers)?;
@@ -27,6 +27,7 @@ pub mod verify;
 pub use error::DataUpdateError;
 pub use onchain::*;
 pub use payload::DataUpdate;
+pub use payload::SchnorrSignature;
 pub use state::*;
 
 // High-level verification API.

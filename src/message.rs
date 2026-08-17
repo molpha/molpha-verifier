@@ -24,7 +24,11 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
 ///
 /// `signatures_required` is passed explicitly (not read from `payload`) because callers may
 /// verify against a value distinct from `payload.signatures_required` (e.g. `job.signatures_required`).
-pub fn compute_message_hash(payload: &DataUpdate, signatures_required: u8) -> [u8; 32] {
+pub fn compute_message_hash(
+    payload: &DataUpdate,
+    signers_bitmap: [u8; 32],
+    signatures_required: u8,
+) -> [u8; 32] {
     let registry_version_bytes = payload.registry_version.to_be_bytes();
     let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
     let canonical_timestamp_bytes = (payload.canonical_timestamp as u64).to_be_bytes();
@@ -34,7 +38,7 @@ pub fn compute_message_hash(payload: &DataUpdate, signatures_required: u8) -> [u
         payload.source_id.as_slice(),
         registry_version_bytes.as_slice(),
         signatures_required_bytes.as_slice(),
-        payload.signers_bitmap.as_slice(),
+        signers_bitmap.as_slice(),
         payload.value.as_slice(),
         canonical_timestamp_bytes.as_slice(),
     ])
@@ -62,15 +66,16 @@ mod tests {
             ],
             canonical_timestamp: 1_700_000_123,
             signatures_required: 8,
-            agg_sig_s: [0u8; 32],
-            commitment_addr: [0u8; 20],
-            // uint256(255) big-endian — bits 0..7 set.
-            signers_bitmap: [
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0xff,
-            ],
         }
+    }
+
+    fn fixture_signers_bitmap() -> [u8; 32] {
+        // uint256(255) big-endian — bits 0..7 set.
+        [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0xff,
+        ]
     }
 
     #[test]
@@ -83,40 +88,61 @@ mod tests {
     fn compute_message_hash_is_deterministic() {
         let p = fixture_payload();
         assert_eq!(
-            compute_message_hash(&p, p.signatures_required),
-            compute_message_hash(&p, p.signatures_required)
+            compute_message_hash(&p, fixture_signers_bitmap(), p.signatures_required),
+            compute_message_hash(&p, fixture_signers_bitmap(), p.signatures_required)
         );
     }
 
     #[test]
     fn compute_message_hash_is_sensitive_to_each_field() {
         let base = fixture_payload();
-        let base_hash = compute_message_hash(&base, base.signatures_required);
+        let base_hash =
+            compute_message_hash(&base, fixture_signers_bitmap(), base.signatures_required);
 
         let mut a = fixture_payload();
         a.registry_version += 1;
-        assert_ne!(compute_message_hash(&a, a.signatures_required), base_hash);
-
-        let b = fixture_payload();
         assert_ne!(
-            compute_message_hash(&b, b.signatures_required.saturating_sub(1)),
+            compute_message_hash(&a, fixture_signers_bitmap(), a.signatures_required),
             base_hash
         );
 
-        let mut c = fixture_payload();
-        c.signers_bitmap[31] ^= 0x01;
-        assert_ne!(compute_message_hash(&c, c.signatures_required), base_hash);
+        let b = fixture_payload();
+        assert_ne!(
+            compute_message_hash(
+                &b,
+                fixture_signers_bitmap(),
+                b.signatures_required.saturating_sub(1)
+            ),
+            base_hash
+        );
+
+        let c = fixture_payload();
+        let mut signers_bitmap = fixture_signers_bitmap();
+        signers_bitmap[31] ^= 0x01;
+        assert_ne!(
+            compute_message_hash(&c, signers_bitmap, c.signatures_required),
+            base_hash
+        );
 
         let mut d = fixture_payload();
         d.value[0] ^= 0xff;
-        assert_ne!(compute_message_hash(&d, d.signatures_required), base_hash);
+        assert_ne!(
+            compute_message_hash(&d, fixture_signers_bitmap(), d.signatures_required),
+            base_hash
+        );
 
         let mut e = fixture_payload();
         e.canonical_timestamp += 1;
-        assert_ne!(compute_message_hash(&e, e.signatures_required), base_hash);
+        assert_ne!(
+            compute_message_hash(&e, fixture_signers_bitmap(), e.signatures_required),
+            base_hash
+        );
 
         let mut f = fixture_payload();
         f.source_id[0] ^= 0xff;
-        assert_ne!(compute_message_hash(&f, f.signatures_required), base_hash);
+        assert_ne!(
+            compute_message_hash(&f, fixture_signers_bitmap(), f.signatures_required),
+            base_hash
+        );
     }
 }

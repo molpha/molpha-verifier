@@ -7,7 +7,8 @@
 use crate::{
     bitmap::{bitmap_load, for_each_set_bit_u256},
     secp256k1_scalar_is_valid_nonzero, verify_aggregate_over_hash, verify_data_update, DataUpdate,
-    DataUpdateError, NodeEntry, RegistryTransitionType, RegistryView, SignerXy, VIRTUAL_INDEX,
+    DataUpdateError, NodeEntry, RegistryTransitionType, RegistryView, SchnorrSignature, SignerXy,
+    VIRTUAL_INDEX,
 };
 
 #[inline(always)]
@@ -106,6 +107,7 @@ pub fn resolve_ordered_signers(
 #[allow(clippy::too_many_arguments)]
 pub fn verify_data_update_resolved(
     payload: &DataUpdate,
+    signature: &SchnorrSignature,
     registry: &RegistryView,
     redundancy_buffer: u8,
     now: i64,
@@ -115,10 +117,10 @@ pub fn verify_data_update_resolved(
         entries,
         registry,
         payload.registry_version,
-        &payload.signers_bitmap,
+        &signature.signers_bitmap,
         now,
     )?;
-    verify_data_update(payload, node_count, redundancy_buffer, &ordered)
+    verify_data_update(payload, signature, node_count, redundancy_buffer, &ordered)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -10,7 +10,7 @@ use molpha_verifier::{
     },
     coalition::CoalitionAccumulator,
     message::compute_message_hash,
-    payload::DataUpdate,
+    payload::{DataUpdate, SchnorrSignature},
     scalar::{mul_mod, secp256k1_scalar_is_valid_nonzero},
     selection::derive_selection_bitmap,
     verify::{reconstruct_coalition_key, SignerXy},
@@ -139,33 +139,28 @@ fn arb_data_update() -> impl Strategy<Value = DataUpdate> {
         prop::collection::vec(any::<u8>(), 0..=256),
         any::<i64>(),
         any::<u8>(),
-        any::<[u8; 32]>(),
-        any::<[u8; 20]>(),
-        any::<[u8; 32]>(),
     )
         .prop_map(
-            |(
-                source_id,
-                registry_version,
-                value,
-                canonical_timestamp,
-                signatures_required,
-                agg_sig_s,
-                commitment_addr,
-                signers_bitmap,
-            )| {
+            |(source_id, registry_version, value, canonical_timestamp, signatures_required)| {
                 DataUpdate {
                     source_id,
                     registry_version,
                     value,
                     canonical_timestamp,
                     signatures_required,
-                    agg_sig_s,
-                    commitment_addr,
-                    signers_bitmap,
                 }
             },
         )
+}
+
+fn arb_schnorr_signature() -> impl Strategy<Value = SchnorrSignature> {
+    (any::<[u8; 32]>(), any::<[u8; 20]>(), any::<[u8; 32]>()).prop_map(
+        |(agg_sig_s, commitment_addr, signers_bitmap)| SchnorrSignature {
+            agg_sig_s,
+            commitment_addr,
+            signers_bitmap,
+        },
+    )
 }
 
 proptest! {
@@ -357,10 +352,11 @@ proptest! {
     #[test]
     fn compute_message_hash_is_deterministic(
         payload in arb_data_update(),
+        signature in arb_schnorr_signature(),
         sig_req in any::<u8>(),
     ) {
-        let a = compute_message_hash(&payload, sig_req);
-        let b = compute_message_hash(&payload, sig_req);
+        let a = compute_message_hash(&payload, signature.signers_bitmap, sig_req);
+        let b = compute_message_hash(&payload, signature.signers_bitmap, sig_req);
         prop_assert_eq!(a, b);
     }
 }

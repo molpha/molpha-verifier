@@ -7,7 +7,7 @@ The downstream Solana program (or any other consumer) owns registry account type
 
 ## What it verifies
 
-Given a signed [`DataUpdate`](src/payload.rs) and the signing nodes' secp256k1 pubkeys, verification:
+Given a [`DataUpdate`](src/payload.rs) payload, a [`SchnorrSignature`](src/payload.rs), and the signing nodes' secp256k1 pubkeys, verification:
 
 1. Rejects an invalid / zero aggregate scalar `s`
 2. Enforces `popcount(signers_bitmap) ≥ signatures_required`
@@ -20,20 +20,27 @@ Optional helpers resolve ordered signers from a plain [`RegistryView`](src/state
 
 ### `DataUpdate`
 
-Field order matches on-chain `SubmitDataUpdateArgs` for mechanical copying:
+Content fields carried with the update:
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `source_id` | `[u8; 32]` | Source identifier (often ASCII-padded) |
-| `registry_version` | `u32` | Registry snapshot referenced by the update |
 | `value` | `Vec<u8>` | Arbitrary-length payload; hashed as-is into the message |
 | `canonical_timestamp` | `i64` | Round timestamp; used in selection seed |
+| `registry_version` | `u32` | Registry snapshot referenced by the update |
 | `signatures_required` | `u8` | Threshold encoded in the payload |
+
+With the `borsh` feature, `value` serializes as standard Borsh `Vec<u8>` (u32 LE length prefix + bytes), matching Anchor `Vec<u8>` on-chain.
+
+### `SchnorrSignature`
+
+Aggregate signature material, passed separately from the payload:
+
+| Field | Type | Notes |
+| --- | --- | --- |
 | `agg_sig_s` | `[u8; 32]` | Aggregate Schnorr scalar `s` |
 | `commitment_addr` | `[u8; 20]` | Ethereum address of nonce point `R` |
 | `signers_bitmap` | `[u8; 32]` | EVM `uint256` bitmap (big-endian) |
-
-With the `borsh` feature, `value` serializes as standard Borsh `Vec<u8>` (u32 LE length prefix + bytes), matching Anchor `Vec<u8>` on-chain.
 
 ## Install
 
@@ -50,12 +57,13 @@ molpha-verifier = "0.2"
 ### Already-resolved signers
 
 ```rust
-use molpha_verifier::{verify_data_update, DataUpdate, SignerXy};
+use molpha_verifier::{verify_data_update, DataUpdate, SchnorrSignature, SignerXy};
 
-// `ordered_signers`: one (x, y) per set bit of `payload.signers_bitmap`,
+// `ordered_signers`: one (x, y) per set bit of `signature.signers_bitmap`,
 // in ascending bit-index order (same order as EVM Validator.verify).
 verify_data_update(
     &payload,
+    &signature,
     node_count,
     redundancy_buffer,
     &ordered_signers,
@@ -73,6 +81,7 @@ use molpha_verifier::{
 
 verify_data_update_resolved(
     &payload,
+    &signature,
     &registry,
     redundancy_buffer,
     now,
@@ -92,8 +101,8 @@ use molpha_verifier::verify_aggregate_over_hash;
 // Ok(true) = valid, Ok(false) = invalid (slashable), Err = malformed input
 let valid = verify_aggregate_over_hash(
     &ordered_signers,
-    &payload.agg_sig_s,
-    &payload.commitment_addr,
+    &signature.agg_sig_s,
+    &signature.commitment_addr,
     &message_hash,
 )?;
 ```
@@ -104,7 +113,7 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved`.
 
 | Module | Role |
 | --- | --- |
-| `payload` | Plain `DataUpdate` struct (field-compatible with on-chain args) |
+| `payload` | Plain `DataUpdate` and `SchnorrSignature` structs |
 | `verify` | High-level verify, coalition reconstruction, dispute helpers |
 | `onchain` | Signer resolution over `RegistryView` / `NodeEntry` |
 | `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
@@ -120,7 +129,7 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved`.
 | Feature | Effect |
 | --- | --- |
 | *(default)* | Pure verification; no Borsh |
-| `borsh` | Derive Borsh on `DataUpdate` (length-prefixed `value`) |
+| `borsh` | Derive Borsh on `DataUpdate` and `SchnorrSignature` (length-prefixed `value`) |
 
 ## Development
 

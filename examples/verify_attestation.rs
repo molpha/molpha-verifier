@@ -55,7 +55,7 @@ fn main() -> Result<(), AttestationError> {
     // 2. Verify aggregate Schnorr signature.
     //
     // `node_count` is the registry size for `payload.registry_version`. Seven signers at bitmap
-    // positions 0, 2, 3, 4, 9, 10, 11 (signersBitmap = 3613); threshold 5; redundancy_buffer 2.
+    // positions 3, 5, 7, 8, 9, 10, 11 (signersBitmap = 4008); threshold 5; redundancy_buffer 2.
     // `ordered_signers` are the signing nodes' compressed pubkeys in ascending bitmap-bit order.
     let mut signer_pubkeys = Vec::new();
     for_each_set_bit(&fixtures::SIGNERS_BITMAP, |i| {

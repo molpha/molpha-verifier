@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn evm_schnorr_trick_recovers_commitment_for_verify_answer_fixture_vector() {
-        /// Must match `crates/molpha-verifier/src/message.rs`.
+        /// Domain prefix — same constant as `message::MESSAGE_PREFIX`.
         const MESSAGE_PREFIX: [u8; 32] = [
             0xa7, 0x55, 0x23, 0xa2, 0xab, 0x7b, 0x71, 0x8d, 0x9c, 0xff, 0xd2, 0xfa, 0x97, 0xed,
             0x06, 0x9f, 0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22,
@@ -600,7 +600,10 @@ mod tests {
             0x00, 0x00, 0x00, 0x00,
         ];
         let registry_version = 42u32;
-        let signatures_required = 3u32;
+        let signatures_required = 3u8;
+        // `verify-answer.test.ts` uses a legacy hash layout (not `_constructMessage`) with
+        // big-endian `uint32` threshold packing.
+        let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
 
         // EVM bitmap integer `7` => nodes {1,2,3} => bits 0..2 set in EVM uint256 layout.
         let signers_bitmap: [u8; 32] = [
@@ -619,7 +622,7 @@ mod tests {
             MESSAGE_PREFIX.as_slice(),
             source_id.as_slice(),
             registry_version.to_be_bytes().as_slice(),
-            signatures_required.to_be_bytes().as_slice(),
+            signatures_required_bytes.as_slice(),
             signers_bitmap.as_slice(),
             value_bytes32.as_slice(),
             timestamp.to_be_bytes().as_slice(),

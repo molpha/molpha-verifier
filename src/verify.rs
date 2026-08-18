@@ -78,7 +78,7 @@ pub(crate) fn verify_attestation_parts(
 
     let signers = bitmap_load(&signature.signers_bitmap);
     let signer_count = signers.count_ones();
-    if signer_count < payload.signatures_required {
+    if signer_count < u32::from(payload.signatures_required) {
         return Err(AttestationError::InsufficientSigners);
     }
 
@@ -260,7 +260,7 @@ mod tests {
         use crate::bitmap::bitmap_popcount_evm;
         let popcount = bitmap_popcount_evm(&SIGNERS_BITMAP);
         assert_eq!(popcount, SIGNER_COUNT);
-        assert!(popcount >= SIGNATURES_REQUIRED);
+        assert!(popcount >= u32::from(SIGNATURES_REQUIRED));
     }
 
     /// The coalition-from-pubkeys path must match `PublicKey::combine`.

@@ -42,8 +42,8 @@ pub fn compute_message_hash(payload: &AttestationPayload, signers_bitmap: [u8; 3
 mod tests {
     use super::*;
     use crate::fixtures::{
-        CANONICAL_TIMESTAMP, REGISTRY_VERSION, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID,
-        VALUE,
+        CANONICAL_TIMESTAMP, MESSAGE_HASH, REGISTRY_VERSION, SIGNATURES_REQUIRED, SIGNERS_BITMAP,
+        SOURCE_ID, VALUE,
     };
 
     fn fixture_payload() -> AttestationPayload {
@@ -72,6 +72,15 @@ mod tests {
         assert_eq!(
             compute_message_hash(&p, fixture_signers_bitmap()),
             compute_message_hash(&p, fixture_signers_bitmap())
+        );
+    }
+
+    #[test]
+    fn compute_message_hash_matches_evm_fixture() {
+        let p = fixture_payload();
+        assert_eq!(
+            compute_message_hash(&p, fixture_signers_bitmap()),
+            MESSAGE_HASH,
         );
     }
 

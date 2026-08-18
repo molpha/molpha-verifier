@@ -227,12 +227,12 @@ pub fn bitmap_is_subset(sub: &[u8; 32], sup: &[u8; 32]) -> bool {
 /// Selection slot count: `min(node_count, signatures_required + redundancy_buffer)`.
 #[inline]
 pub fn effective_selection_size(
-    signatures_required: u32,
+    signatures_required: u8,
     redundancy_buffer: u8,
     node_count: u32,
 ) -> u32 {
-    signatures_required
-        .saturating_add(redundancy_buffer as u32)
+    u32::from(signatures_required)
+        .saturating_add(u32::from(redundancy_buffer))
         .min(node_count)
 }
 

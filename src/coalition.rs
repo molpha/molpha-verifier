@@ -2,7 +2,7 @@
 //!
 //! Pure, anchor-free. Moved from the Molpha program's `utils/account_layout.rs`
 //! (only the curve-math helpers; the anchor/PDA account readers stay in the program).
-//! `error!()`/`require!()` are replaced with plain [`DataUpdateError`] returns.
+//! `error!()`/`require!()` are replaced with plain [`AttestationError`] returns.
 
 use libsecp256k1::util::{TAG_PUBKEY_EVEN, TAG_PUBKEY_ODD};
 use libsecp256k1::{
@@ -10,20 +10,20 @@ use libsecp256k1::{
     PublicKey, PublicKeyFormat,
 };
 
-use crate::error::DataUpdateError;
+use crate::error::AttestationError;
 
 /// Load a curve point from registry-stored `(x, y)` without an on-curve re-check.
 ///
 /// Coordinates are validated at registration; the data-update hot path only needs field parsing.
 #[inline(always)]
-pub fn affine_from_stored_secp_xy(x: &[u8; 32], y: &[u8; 32]) -> Result<Affine, DataUpdateError> {
+pub fn affine_from_stored_secp_xy(x: &[u8; 32], y: &[u8; 32]) -> Result<Affine, AttestationError> {
     if *x == [0u8; 32] || *y == [0u8; 32] {
-        return Err(DataUpdateError::InvalidAggregateSignature);
+        return Err(AttestationError::InvalidAggregateSignature);
     }
     let mut fx = Field::default();
     let mut fy = Field::default();
     if !fx.set_b32(x) || !fy.set_b32(y) {
-        return Err(DataUpdateError::InvalidAggregateSignature);
+        return Err(AttestationError::InvalidAggregateSignature);
     }
     let mut ge = Affine::default();
     ge.set_xy(&fx, &fy);
@@ -39,7 +39,7 @@ pub struct CoalitionAccumulator {
 
 impl CoalitionAccumulator {
     #[inline(always)]
-    pub fn add_stored_xy(&mut self, x: &[u8; 32], y: &[u8; 32]) -> Result<(), DataUpdateError> {
+    pub fn add_stored_xy(&mut self, x: &[u8; 32], y: &[u8; 32]) -> Result<(), AttestationError> {
         let ge = affine_from_stored_secp_xy(x, y)?;
         if !self.has_point {
             self.jacobian = Jacobian::from_ge(&ge);
@@ -51,12 +51,12 @@ impl CoalitionAccumulator {
     }
 
     #[inline(always)]
-    pub fn compressed_pubkey(&self) -> Result<[u8; 33], DataUpdateError> {
+    pub fn compressed_pubkey(&self) -> Result<[u8; 33], AttestationError> {
         if !self.has_point {
-            return Err(DataUpdateError::InvalidAggregateSignature);
+            return Err(AttestationError::InvalidAggregateSignature);
         }
         if self.jacobian.is_infinity() {
-            return Err(DataUpdateError::InvalidAggregateSignature);
+            return Err(AttestationError::InvalidAggregateSignature);
         }
         let mut elem = Affine::from_gej(&self.jacobian);
         elem.x.normalize_var();
@@ -82,15 +82,15 @@ pub fn public_key_from_affine_xy(
     uncompressed_scratch: &mut [u8; 65],
     x: &[u8; 32],
     y: &[u8; 32],
-) -> Result<PublicKey, DataUpdateError> {
+) -> Result<PublicKey, AttestationError> {
     if *x == [0u8; 32] || *y == [0u8; 32] {
-        return Err(DataUpdateError::InvalidAggregateSignature);
+        return Err(AttestationError::InvalidAggregateSignature);
     }
     uncompressed_scratch[0] = 0x04;
     uncompressed_scratch[1..33].copy_from_slice(x);
     uncompressed_scratch[33..65].copy_from_slice(y);
     PublicKey::parse_slice(uncompressed_scratch.as_ref(), Some(PublicKeyFormat::Full))
-        .map_err(|_| DataUpdateError::InvalidAggregateSignature)
+        .map_err(|_| AttestationError::InvalidAggregateSignature)
 }
 
 #[cfg(test)]

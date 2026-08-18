@@ -1,25 +1,24 @@
-//! Verify a Molpha [`DataUpdate`] + [`SchnorrSignature`] using the EVM-compat fixture from
+//! Verify a Molpha [`Attestation`] using the EVM-compat fixture from
 //! `tests/fixtures-json/verify-answer-evm.json`.
 //!
 //! Run:
 //! ```text
-//! cargo run -p molpha-verifier --example verify_data_update --features borsh
+//! cargo run -p molpha-verifier --example verify_attestation --features borsh
 //! ```
 
 use borsh::BorshDeserialize;
 use molpha_verifier::{
-    compute_message_hash, verify_data_update_compressed, DataUpdate, DataUpdateError,
-    SchnorrSignature,
+    compute_message_hash, verify_attestation_compressed, Attestation, AttestationError,
+    AttestationPayload, SchnorrSignature,
 };
 
-/// 81-byte borsh encoding of the fixture `DataUpdate`.
-const FIXTURE_PAYLOAD_BORSH: [u8; 81] = [
+/// 80-byte borsh encoding of the fixture `AttestationPayload`.
+const FIXTURE_PAYLOAD_BORSH: [u8; 80] = [
+    0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d, 0x76, 0x61,
+    0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d, 0x6a, 0x6f,
     0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x20, 0x00, 0x00, 0x00, 0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61,
-    0x74, 0x2d, 0x76, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x7b, 0xf1, 0x53, 0x65, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x08,
+    0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x7b, 0xf1, 0x53, 0x65, 0x00, 0x00, 0x00, 0x00,
 ];
 
 /// 84-byte borsh encoding of the fixture aggregate Schnorr signature.
@@ -76,26 +75,47 @@ const FIXTURE_SIGNER_PUBKEYS: [[u8; 33]; 8] = [
     ],
 ];
 
-fn main() -> Result<(), DataUpdateError> {
-    // 1. Decode the wire-format payload and aggregate signature (e.g. from instruction args).
-    let payload = DataUpdate::try_from_slice(&FIXTURE_PAYLOAD_BORSH)
+fn main() -> Result<(), AttestationError> {
+    // 1. Decode the wire-format attestation (e.g. from instruction args).
+    let payload = AttestationPayload::try_from_slice(&FIXTURE_PAYLOAD_BORSH)
         .expect("fixture payload borsh must decode");
     let signature = SchnorrSignature::try_from_slice(&FIXTURE_SIGNATURE_BORSH)
         .expect("fixture signature borsh must decode");
+    let attestation = Attestation {
+        payload: payload.clone(),
+        signature: signature.clone(),
+    };
+    let mut attestation_borsh = FIXTURE_PAYLOAD_BORSH.to_vec();
+    attestation_borsh.extend_from_slice(&FIXTURE_SIGNATURE_BORSH);
+    let decoded_attestation = Attestation::try_from_slice(&attestation_borsh)
+        .expect("fixture attestation borsh must decode");
+    assert_eq!(decoded_attestation, attestation);
 
     println!(
         "decoded source_id:        {:?}",
-        ascii_prefix(&payload.source_id)
+        ascii_prefix(&attestation.payload.source_id)
     );
-    println!("decoded value:          {:?}", ascii_prefix(&payload.value));
-    println!("registry_version:       {}", payload.registry_version);
-    println!("signatures_required:    {}", payload.signatures_required);
-    println!("canonical_timestamp:    {}", payload.canonical_timestamp);
+    println!(
+        "decoded value:            {:?}",
+        ascii_prefix(&attestation.payload.value)
+    );
+    println!(
+        "registry_version:         {}",
+        attestation.payload.registry_version
+    );
+    println!(
+        "signatures_required:      {}",
+        attestation.payload.signatures_required
+    );
+    println!(
+        "canonical_timestamp:      {}",
+        attestation.payload.canonical_timestamp
+    );
 
     let message_hash = compute_message_hash(
-        &payload,
-        signature.signers_bitmap,
-        payload.signatures_required,
+        &attestation.payload,
+        attestation.signature.signers_bitmap,
+        attestation.payload.signatures_required,
     );
     println!(
         "message_hash:           0x{}",
@@ -110,7 +130,7 @@ fn main() -> Result<(), DataUpdateError> {
     // `node_count` is the registry size for `payload.registry_version`. For this fixture all eight
     // signers are selected (bitmap 0xff, threshold 8, redundancy_buffer 0).
     // `ordered_signers` are the signing nodes' compressed pubkeys in ascending bitmap-bit order.
-    verify_data_update_compressed(&payload, &signature, 8, 0, &FIXTURE_SIGNER_PUBKEYS)?;
+    verify_attestation_compressed(&attestation, 8, 0, &FIXTURE_SIGNER_PUBKEYS)?;
 
     println!("aggregate Schnorr signature: OK");
     Ok(())

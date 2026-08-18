@@ -1,8 +1,8 @@
-//! EVM-compatible `DataUpdate` message hash.
+//! EVM-compatible attestation message hash.
 
 use solana_keccak_hasher::hashv;
 
-use crate::payload::DataUpdate;
+use crate::payload::AttestationPayload;
 
 /// `bytes32(keccak256("MOLPHA_MESSAGE_V1"))` — EVM `Validator._constructMessage` prefix.
 ///
@@ -12,7 +12,7 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
     0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22, 0xf7, 0x0e, 0x7f, 0xe7,
 ];
 
-/// Compute the EVM-compatible `DataUpdate` message hash.
+/// Compute the EVM-compatible attestation message hash.
 ///
 /// Matches `Validator._constructMessage` in the EVM reference implementation:
 /// ```text
@@ -25,13 +25,13 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
 /// `signatures_required` is passed explicitly (not read from `payload`) because callers may
 /// verify against a value distinct from `payload.signatures_required` (e.g. `job.signatures_required`).
 pub fn compute_message_hash(
-    payload: &DataUpdate,
+    payload: &AttestationPayload,
     signers_bitmap: [u8; 32],
-    signatures_required: u8,
+    signatures_required: u32,
 ) -> [u8; 32] {
     let registry_version_bytes = payload.registry_version.to_be_bytes();
-    let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
-    let canonical_timestamp_bytes = (payload.canonical_timestamp as u64).to_be_bytes();
+    let signatures_required_bytes = signatures_required.to_be_bytes();
+    let canonical_timestamp_bytes = payload.canonical_timestamp.to_be_bytes();
 
     hashv(&[
         MESSAGE_PREFIX.as_slice(),
@@ -49,8 +49,14 @@ pub fn compute_message_hash(
 mod tests {
     use super::*;
 
-    fn fixture_payload() -> DataUpdate {
-        DataUpdate {
+    fn fixture_payload() -> AttestationPayload {
+        AttestationPayload {
+            // "solana-compat-val" right-padded to 32 bytes.
+            value: [
+                0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d,
+                0x76, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+            ],
             // "solana-compat-job" right-padded to 32 bytes.
             source_id: [
                 0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d,
@@ -58,14 +64,8 @@ mod tests {
                 0x00, 0x00, 0x00, 0x00,
             ],
             registry_version: 1,
-            // "solana-compat-val" right-padded to 32 bytes.
-            value: vec![
-                0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d,
-                0x76, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
-            ],
-            canonical_timestamp: 1_700_000_123,
             signatures_required: 8,
+            canonical_timestamp: 1_700_000_123,
         }
     }
 

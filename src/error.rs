@@ -1,11 +1,11 @@
-//! Error type for DataUpdate verification.
+//! Error type for attestation verification.
 //!
 //! These are pure verification errors, mapped by downstream programs at the call boundary.
 //! Account-borrow/deserialization errors are produced and handled by the caller (which owns the
 //! framework-specific account I/O) and never cross the crate boundary.
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum DataUpdateError {
+pub enum AttestationError {
     /// Aggregate Schnorr signature failed verification (recovered address mismatch,
     /// invalid coalition key, or invalid scalar `s`).
     InvalidAggregateSignature,

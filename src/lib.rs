@@ -1,16 +1,16 @@
-//! Molpha DataUpdate aggregate-Schnorr verification.
+//! Molpha attestation aggregate-Schnorr verification.
 //!
 //! A framework-agnostic library (no Anchor / Pinocchio dependency): the downstream program owns the
-//! registry account types and reads them, then passes plain data in. Verify a Molpha [`DataUpdate`]
-//! either from already-resolved signer pubkeys ([`verify_data_update`]) or from parsed registry
-//! entries plus a [`RegistryView`] ([`verify_data_update_resolved`]).
+//! registry account types and reads them, then passes plain data in. Verify a Molpha
+//! [`Attestation`] either from already-resolved signer pubkeys ([`verify_attestation`]) or from
+//! parsed registry entries plus a [`RegistryView`] ([`verify_attestation_resolved`]).
 //!
 //! # Usage
 //! ```ignore
-//! use molpha_verifier::{verify_data_update, DataUpdate, SchnorrSignature};
+//! use molpha_verifier::{verify_attestation, Attestation};
 //!
 //! // `ordered_signers` are the signing nodes' (x, y) pubkeys in ascending signers_bitmap bit order.
-//! verify_data_update(&payload, node_count, redundancy_buffer, &ordered_signers)?;
+//! verify_attestation(&attestation, node_count, redundancy_buffer, &ordered_signers)?;
 //! ```
 
 pub mod bitmap;
@@ -24,16 +24,17 @@ pub mod selection;
 pub mod state;
 pub mod verify;
 
-pub use error::DataUpdateError;
+pub use error::AttestationError;
 pub use onchain::*;
-pub use payload::DataUpdate;
+pub use payload::Attestation;
+pub use payload::AttestationPayload;
 pub use payload::SchnorrSignature;
 pub use state::*;
 
 // High-level verification API.
 pub use verify::{
     reconstruct_coalition_key, reconstruct_coalition_key_compressed, verify_aggregate_over_hash,
-    verify_data_update, verify_data_update_compressed, SignerXy,
+    verify_attestation, verify_attestation_compressed, SignerXy,
 };
 
 // Primitives commonly composed by on-chain callers.

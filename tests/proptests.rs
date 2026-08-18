@@ -10,7 +10,7 @@ use molpha_verifier::{
     },
     coalition::CoalitionAccumulator,
     message::compute_message_hash,
-    payload::{DataUpdate, SchnorrSignature},
+    payload::{AttestationPayload, SchnorrSignature},
     scalar::{mul_mod, secp256k1_scalar_is_valid_nonzero},
     selection::derive_selection_bitmap,
     verify::{reconstruct_coalition_key, SignerXy},
@@ -132,22 +132,22 @@ fn full_mask_bytes(node_count: u32) -> [u8; 32] {
     bitmap_store(mask)
 }
 
-fn arb_data_update() -> impl Strategy<Value = DataUpdate> {
+fn arb_attestation_payload() -> impl Strategy<Value = AttestationPayload> {
     (
         any::<[u8; 32]>(),
+        any::<[u8; 32]>(),
         any::<u32>(),
-        prop::collection::vec(any::<u8>(), 0..=256),
-        any::<i64>(),
-        any::<u8>(),
+        any::<u32>(),
+        any::<u64>(),
     )
         .prop_map(
-            |(source_id, registry_version, value, canonical_timestamp, signatures_required)| {
-                DataUpdate {
+            |(value, source_id, registry_version, signatures_required, canonical_timestamp)| {
+                AttestationPayload {
+                    value,
                     source_id,
                     registry_version,
-                    value,
-                    canonical_timestamp,
                     signatures_required,
+                    canonical_timestamp,
                 }
             },
         )
@@ -221,12 +221,12 @@ proptest! {
 
     #[test]
     fn effective_selection_size_is_bounded_and_formulaic(
-        signatures_required in any::<u8>(),
+        signatures_required in any::<u32>(),
         redundancy_buffer in any::<u8>(),
         node_count in 1u32..=256,
     ) {
         let got = effective_selection_size(signatures_required, redundancy_buffer, node_count);
-        let want = (u32::from(signatures_required) + u32::from(redundancy_buffer)).min(node_count);
+        let want = (signatures_required + u32::from(redundancy_buffer)).min(node_count);
         prop_assert_eq!(got, want);
         prop_assert!(got <= node_count);
     }
@@ -277,9 +277,9 @@ proptest! {
     fn derive_selection_bitmap_is_deterministic(
         source_id in any::<[u8; 32]>(),
         registry_version in any::<u32>(),
-        canonical_timestamp in any::<i64>(),
+        canonical_timestamp in any::<u64>(),
         node_count in 1u32..=64,
-        signatures_required in any::<u8>(),
+        signatures_required in any::<u32>(),
         redundancy_buffer in any::<u8>(),
     ) {
         let a = derive_selection_bitmap(
@@ -351,9 +351,9 @@ proptest! {
 
     #[test]
     fn compute_message_hash_is_deterministic(
-        payload in arb_data_update(),
+        payload in arb_attestation_payload(),
         signature in arb_schnorr_signature(),
-        sig_req in any::<u8>(),
+        sig_req in any::<u32>(),
     ) {
         let a = compute_message_hash(&payload, signature.signers_bitmap, sig_req);
         let b = compute_message_hash(&payload, signature.signers_bitmap, sig_req);

@@ -17,20 +17,13 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
 /// Matches `Validator._constructMessage` in the EVM reference implementation:
 /// ```text
 /// keccak256(abi.encodePacked(
-///     MESSAGE_PREFIX, sourceId, registryVersion, signaturesRequired,
-///     signersBitmap, value, canonicalTimestamp
+///     MESSAGE_PREFIX, value, sourceId, registryVersion, signaturesRequired,
+///     canonicalTimestamp, signersBitmap
 /// ))
 /// ```
-///
-/// `signatures_required` is passed explicitly (not read from `payload`) because callers may
-/// verify against a value distinct from `payload.signatures_required` (e.g. `job.signatures_required`).
-pub fn compute_message_hash(
-    payload: &AttestationPayload,
-    signers_bitmap: [u8; 32],
-    signatures_required: u32,
-) -> [u8; 32] {
+pub fn compute_message_hash(payload: &AttestationPayload, signers_bitmap: [u8; 32]) -> [u8; 32] {
     let registry_version_bytes = payload.registry_version.to_be_bytes();
-    let signatures_required_bytes = signatures_required.to_be_bytes();
+    let signatures_required_bytes = payload.signatures_required.to_be_bytes();
     let canonical_timestamp_bytes = payload.canonical_timestamp.to_be_bytes();
 
     hashv(&[
@@ -48,32 +41,23 @@ pub fn compute_message_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::{
+        CANONICAL_TIMESTAMP, REGISTRY_VERSION, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID,
+        VALUE,
+    };
 
     fn fixture_payload() -> AttestationPayload {
         AttestationPayload {
-            value: [
-                0xe1, 0xcd, 0x5b, 0x4f, 0x67, 0xac, 0xdc, 0x78, 0x68, 0xc3, 0xb1, 0x5f, 0x7b, 0x6c,
-                0xc2, 0xdc, 0x27, 0x70, 0x54, 0x53, 0x71, 0x34, 0x2c, 0xab, 0x76, 0x62, 0x71, 0xbb,
-                0x3f, 0xd5, 0xe7, 0x34,
-            ],
-            source_id: [
-                0x0b, 0x0c, 0x5c, 0x4a, 0x0e, 0x67, 0x58, 0x69, 0xda, 0xc2, 0x27, 0x2a, 0x40, 0x04,
-                0x63, 0x65, 0xa2, 0x9c, 0x8a, 0xe7, 0x63, 0x5e, 0x52, 0xc4, 0x94, 0xd8, 0x40, 0xda,
-                0x2e, 0xc8, 0x26, 0xcb,
-            ],
-            registry_version: 12,
-            signatures_required: 5,
-            canonical_timestamp: 1_708_525_180,
+            value: VALUE,
+            source_id: SOURCE_ID,
+            registry_version: REGISTRY_VERSION,
+            signatures_required: SIGNATURES_REQUIRED,
+            canonical_timestamp: CANONICAL_TIMESTAMP,
         }
     }
 
     fn fixture_signers_bitmap() -> [u8; 32] {
-        // uint256(3613) big-endian — bits 0, 2, 3, 4, 9, 10, 11 set.
-        [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x0e, 0x1d,
-        ]
+        SIGNERS_BITMAP
     }
 
     #[test]
@@ -86,60 +70,53 @@ mod tests {
     fn compute_message_hash_is_deterministic() {
         let p = fixture_payload();
         assert_eq!(
-            compute_message_hash(&p, fixture_signers_bitmap(), p.signatures_required),
-            compute_message_hash(&p, fixture_signers_bitmap(), p.signatures_required)
+            compute_message_hash(&p, fixture_signers_bitmap()),
+            compute_message_hash(&p, fixture_signers_bitmap())
         );
     }
 
     #[test]
     fn compute_message_hash_is_sensitive_to_each_field() {
         let base = fixture_payload();
-        let base_hash =
-            compute_message_hash(&base, fixture_signers_bitmap(), base.signatures_required);
+        let base_hash = compute_message_hash(&base, fixture_signers_bitmap());
 
         let mut a = fixture_payload();
         a.registry_version += 1;
         assert_ne!(
-            compute_message_hash(&a, fixture_signers_bitmap(), a.signatures_required),
+            compute_message_hash(&a, fixture_signers_bitmap()),
             base_hash
         );
 
-        let b = fixture_payload();
+        let mut b = fixture_payload();
+        b.signatures_required += 1;
         assert_ne!(
-            compute_message_hash(
-                &b,
-                fixture_signers_bitmap(),
-                b.signatures_required.saturating_sub(1)
-            ),
+            compute_message_hash(&b, fixture_signers_bitmap()),
             base_hash
         );
 
         let c = fixture_payload();
         let mut signers_bitmap = fixture_signers_bitmap();
         signers_bitmap[31] ^= 0x01;
-        assert_ne!(
-            compute_message_hash(&c, signers_bitmap, c.signatures_required),
-            base_hash
-        );
+        assert_ne!(compute_message_hash(&c, signers_bitmap), base_hash);
 
         let mut d = fixture_payload();
         d.value[0] ^= 0xff;
         assert_ne!(
-            compute_message_hash(&d, fixture_signers_bitmap(), d.signatures_required),
+            compute_message_hash(&d, fixture_signers_bitmap()),
             base_hash
         );
 
         let mut e = fixture_payload();
         e.canonical_timestamp += 1;
         assert_ne!(
-            compute_message_hash(&e, fixture_signers_bitmap(), e.signatures_required),
+            compute_message_hash(&e, fixture_signers_bitmap()),
             base_hash
         );
 
         let mut f = fixture_payload();
         f.source_id[0] ^= 0xff;
         assert_ne!(
-            compute_message_hash(&f, fixture_signers_bitmap(), f.signatures_required),
+            compute_message_hash(&f, fixture_signers_bitmap()),
             base_hash
         );
     }

@@ -13,6 +13,11 @@
 //! verify_attestation(&attestation, node_count, redundancy_buffer, &ordered_signers)?;
 //! ```
 
+#[doc(hidden)]
+#[cfg(any(test, feature = "fixtures"))]
+#[path = "../tests/fixtures/mod.rs"]
+pub mod fixtures;
+
 pub mod bitmap;
 pub mod coalition;
 pub mod error;

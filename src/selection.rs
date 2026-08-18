@@ -3,7 +3,7 @@
 use solana_keccak_hasher::hashv;
 
 use crate::bitmap::{derive_group_bitmap, effective_selection_size};
-use crate::error::DataUpdateError;
+use crate::error::AttestationError;
 
 /// `bytes32(keccak256("MOLPHA_SELECTION_V1"))` — EVM `Validator` selection seed prefix.
 ///
@@ -20,12 +20,12 @@ pub const SELECTION_SEED_PREFIX: [u8; 32] = [
 pub fn derive_selection_bitmap(
     source_id: &[u8; 32],
     registry_version: u32,
-    canonical_timestamp: i64,
+    canonical_timestamp: u64,
     node_count: u32,
-    signatures_required: u8,
+    signatures_required: u32,
     redundancy_buffer: u8,
-) -> Result<[u8; 32], DataUpdateError> {
-    let canonical_timestamp_bytes = (canonical_timestamp as u64).to_be_bytes();
+) -> Result<[u8; 32], AttestationError> {
+    let canonical_timestamp_bytes = canonical_timestamp.to_be_bytes();
     let selection_seed = hashv(&[
         SELECTION_SEED_PREFIX.as_slice(),
         source_id.as_ref(),

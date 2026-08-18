@@ -1,12 +1,12 @@
 //! EVM-compatible `uint256` bitmap operations and deterministic selection-group derivation.
 //!
 //! Pure, anchor-free. Moved verbatim from the Molpha program's `utils/bitmap.rs`
-//! (`MolphaError` → [`DataUpdateError`]).
+//! (`MolphaError` → [`AttestationError`]).
 
 use ethnum::U256;
 use solana_keccak_hasher::hashv;
 
-use crate::error::DataUpdateError;
+use crate::error::AttestationError;
 
 /// `keccak256("MOLPHA_SELECTION_DERIVE")` — EVM `NodeGroupBitmapLib.SELECTION_DOMAIN`.
 const SELECTION_DOMAIN: [u8; 32] = [
@@ -66,9 +66,9 @@ pub fn bitmap_is_subset_u256(sub: U256, sup: U256) -> bool {
 pub fn validate_bitmap_upper_bits_clear_u256(
     bitmap: U256,
     node_count: u32,
-) -> Result<(), DataUpdateError> {
+) -> Result<(), AttestationError> {
     if node_count > 256 {
-        return Err(DataUpdateError::InvalidSignersBitmap);
+        return Err(AttestationError::InvalidSignersBitmap);
     }
     let mask = if node_count == 256 {
         U256::MAX
@@ -76,7 +76,7 @@ pub fn validate_bitmap_upper_bits_clear_u256(
         (U256::from(1u8) << node_count) - U256::from(1u8)
     };
     if (bitmap & !mask) != U256::ZERO {
-        return Err(DataUpdateError::InvalidSignersBitmap);
+        return Err(AttestationError::InvalidSignersBitmap);
     }
     Ok(())
 }
@@ -149,7 +149,7 @@ fn sample_without_replacement(
     seed: &[u8; 32],
     node_count: u32,
     group_size: u32,
-) -> Result<U256, DataUpdateError> {
+) -> Result<U256, AttestationError> {
     let limit = (u64::from(u32::MAX) / u64::from(node_count)) * u64::from(node_count);
     let mut bitmap = U256::ZERO;
     let mut selected = 0u32;
@@ -157,7 +157,7 @@ fn sample_without_replacement(
 
     while selected < group_size {
         if counter >= DERIVE_GROUP_BITMAP_MAX_ROUNDS {
-            return Err(DataUpdateError::GroupBitmapDerivationFailed);
+            return Err(AttestationError::GroupBitmapDerivationFailed);
         }
 
         let digest = selection_hash_round(seed, counter);
@@ -191,15 +191,15 @@ pub fn derive_group_bitmap(
     seed: &[u8; 32],
     node_count: u32,
     group_size: u32,
-) -> Result<[u8; 32], DataUpdateError> {
+) -> Result<[u8; 32], AttestationError> {
     if node_count == 0 {
-        return Err(DataUpdateError::GroupBitmapDerivationFailed);
+        return Err(AttestationError::GroupBitmapDerivationFailed);
     }
     if node_count > 256 {
-        return Err(DataUpdateError::GroupBitmapDerivationFailed);
+        return Err(AttestationError::GroupBitmapDerivationFailed);
     }
     if group_size > node_count {
-        return Err(DataUpdateError::GroupBitmapDerivationFailed);
+        return Err(AttestationError::GroupBitmapDerivationFailed);
     }
     if group_size == 0 {
         return Ok([0u8; 32]);
@@ -227,11 +227,11 @@ pub fn bitmap_is_subset(sub: &[u8; 32], sup: &[u8; 32]) -> bool {
 /// Selection slot count: `min(node_count, signatures_required + redundancy_buffer)`.
 #[inline]
 pub fn effective_selection_size(
-    signatures_required: u8,
+    signatures_required: u32,
     redundancy_buffer: u8,
     node_count: u32,
 ) -> u32 {
-    (signatures_required as u32)
+    signatures_required
         .saturating_add(redundancy_buffer as u32)
         .min(node_count)
 }
@@ -239,7 +239,7 @@ pub fn effective_selection_size(
 pub fn validate_bitmap_upper_bits_clear(
     bitmap: &[u8; 32],
     node_count: u32,
-) -> Result<(), DataUpdateError> {
+) -> Result<(), AttestationError> {
     validate_bitmap_upper_bits_clear_u256(bitmap_load(bitmap), node_count)
 }
 

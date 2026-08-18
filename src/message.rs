@@ -1,8 +1,8 @@
-//! EVM-compatible `DataUpdate` message hash.
+//! EVM-compatible attestation message hash.
 
 use solana_keccak_hasher::hashv;
 
-use crate::payload::DataUpdate;
+use crate::payload::AttestationPayload;
 
 /// `bytes32(keccak256("MOLPHA_MESSAGE_V1"))` — EVM `Validator._constructMessage` prefix.
 ///
@@ -12,7 +12,7 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
     0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22, 0xf7, 0x0e, 0x7f, 0xe7,
 ];
 
-/// Compute the EVM-compatible `DataUpdate` message hash.
+/// Compute the EVM-compatible attestation message hash.
 ///
 /// Matches `Validator._constructMessage` in the EVM reference implementation:
 /// ```text
@@ -25,22 +25,22 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
 /// `signatures_required` is passed explicitly (not read from `payload`) because callers may
 /// verify against a value distinct from `payload.signatures_required` (e.g. `job.signatures_required`).
 pub fn compute_message_hash(
-    payload: &DataUpdate,
+    payload: &AttestationPayload,
     signers_bitmap: [u8; 32],
-    signatures_required: u8,
+    signatures_required: u32,
 ) -> [u8; 32] {
     let registry_version_bytes = payload.registry_version.to_be_bytes();
-    let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
-    let canonical_timestamp_bytes = (payload.canonical_timestamp as u64).to_be_bytes();
+    let signatures_required_bytes = signatures_required.to_be_bytes();
+    let canonical_timestamp_bytes = payload.canonical_timestamp.to_be_bytes();
 
     hashv(&[
         MESSAGE_PREFIX.as_slice(),
+        payload.value.as_slice(),
         payload.source_id.as_slice(),
         registry_version_bytes.as_slice(),
         signatures_required_bytes.as_slice(),
-        signers_bitmap.as_slice(),
-        payload.value.as_slice(),
         canonical_timestamp_bytes.as_slice(),
+        signers_bitmap.as_slice(),
     ])
     .to_bytes()
 }
@@ -49,32 +49,30 @@ pub fn compute_message_hash(
 mod tests {
     use super::*;
 
-    fn fixture_payload() -> DataUpdate {
-        DataUpdate {
-            // "solana-compat-job" right-padded to 32 bytes.
+    fn fixture_payload() -> AttestationPayload {
+        AttestationPayload {
+            value: [
+                0xe1, 0xcd, 0x5b, 0x4f, 0x67, 0xac, 0xdc, 0x78, 0x68, 0xc3, 0xb1, 0x5f, 0x7b, 0x6c,
+                0xc2, 0xdc, 0x27, 0x70, 0x54, 0x53, 0x71, 0x34, 0x2c, 0xab, 0x76, 0x62, 0x71, 0xbb,
+                0x3f, 0xd5, 0xe7, 0x34,
+            ],
             source_id: [
-                0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d,
-                0x6a, 0x6f, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
+                0x0b, 0x0c, 0x5c, 0x4a, 0x0e, 0x67, 0x58, 0x69, 0xda, 0xc2, 0x27, 0x2a, 0x40, 0x04,
+                0x63, 0x65, 0xa2, 0x9c, 0x8a, 0xe7, 0x63, 0x5e, 0x52, 0xc4, 0x94, 0xd8, 0x40, 0xda,
+                0x2e, 0xc8, 0x26, 0xcb,
             ],
-            registry_version: 1,
-            // "solana-compat-val" right-padded to 32 bytes.
-            value: vec![
-                0x73, 0x6f, 0x6c, 0x61, 0x6e, 0x61, 0x2d, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x74, 0x2d,
-                0x76, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
-            ],
-            canonical_timestamp: 1_700_000_123,
-            signatures_required: 8,
+            registry_version: 12,
+            signatures_required: 5,
+            canonical_timestamp: 1_708_525_180,
         }
     }
 
     fn fixture_signers_bitmap() -> [u8; 32] {
-        // uint256(255) big-endian — bits 0..7 set.
+        // uint256(3613) big-endian — bits 0, 2, 3, 4, 9, 10, 11 set.
         [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0xff,
+            0x00, 0x00, 0x0e, 0x1d,
         ]
     }
 

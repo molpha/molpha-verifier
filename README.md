@@ -7,7 +7,7 @@ The downstream Solana program (or any other consumer) owns registry account type
 
 ## What it verifies
 
-Given a [`DataUpdate`](src/payload.rs) payload, a [`SchnorrSignature`](src/payload.rs), and the signing nodes' secp256k1 pubkeys, verification:
+Given an [`AttestationPayload`](src/payload.rs) (or combined [`Attestation`](src/payload.rs)), a [`SchnorrSignature`](src/payload.rs), and the signing nodes' secp256k1 pubkeys, verification:
 
 1. Rejects an invalid / zero aggregate scalar `s`
 2. Enforces `popcount(signers_bitmap) ≥ signatures_required`
@@ -18,19 +18,21 @@ Given a [`DataUpdate`](src/payload.rs) payload, a [`SchnorrSignature`](src/paylo
 
 Optional helpers resolve ordered signers from a plain [`RegistryView`](src/state.rs) + [`NodeEntry`](src/state.rs) slice, including previous-version remove-transition remapping.
 
-### `DataUpdate`
+### `AttestationPayload`
 
-Content fields carried with the update:
+Content fields carried with the attestation:
 
 | Field | Type | Notes |
 | --- | --- | --- |
+| `value` | `[u8; 32]` | Attested value; hashed as-is into the message |
 | `source_id` | `[u8; 32]` | Source identifier (often ASCII-padded) |
-| `value` | `Vec<u8>` | Arbitrary-length payload; hashed as-is into the message |
-| `canonical_timestamp` | `i64` | Round timestamp; used in selection seed |
-| `registry_version` | `u32` | Registry snapshot referenced by the update |
-| `signatures_required` | `u8` | Threshold encoded in the payload |
+| `registry_version` | `u32` | Registry snapshot referenced by the attestation |
+| `signatures_required` | `u32` | Threshold encoded in the payload |
+| `canonical_timestamp` | `u64` | Round timestamp; used in selection seed |
 
-With the `borsh` feature, `value` serializes as standard Borsh `Vec<u8>` (u32 LE length prefix + bytes), matching Anchor `Vec<u8>` on-chain.
+### `Attestation`
+
+Combines [`AttestationPayload`] with [`SchnorrSignature`] for wire-format decode/encode when the `borsh` feature is enabled.
 
 ### `SchnorrSignature`
 
@@ -46,10 +48,10 @@ Aggregate signature material, passed separately from the payload:
 
 ```toml
 [dependencies]
-molpha-verifier = "0.2"
+molpha-verifier = "0.3"
 
 # With Borsh support for wire-format decode/encode:
-# molpha-verifier = { version = "0.2", features = ["borsh"] }
+# molpha-verifier = { version = "0.3", features = ["borsh"] }
 ```
 
 ## Usage
@@ -57,31 +59,30 @@ molpha-verifier = "0.2"
 ### Already-resolved signers
 
 ```rust
-use molpha_verifier::{verify_data_update, DataUpdate, SchnorrSignature, SignerXy};
+use molpha_verifier::{verify_attestation, Attestation, SignerXy};
 
-// `ordered_signers`: one (x, y) per set bit of `signature.signers_bitmap`,
+// `ordered_signers`: one (x, y) per set bit of `attestation.signature.signers_bitmap`,
 // in ascending bit-index order (same order as EVM Validator.verify).
-verify_data_update(
-    &payload,
-    &signature,
+verify_attestation(
+    &attestation,
     node_count,
     redundancy_buffer,
     &ordered_signers,
 )?;
 ```
 
-Compressed (33-byte) pubkeys: `verify_data_update_compressed`.
+Compressed (33-byte) pubkeys: `verify_attestation_compressed`.
 
 ### Registry-resolved path
 
 ```rust
 use molpha_verifier::{
-    verify_data_update_resolved, NodeEntry, RegistryView,
+    verify_attestation_resolved, NodeEntry, RegistryView,
 };
 
-verify_data_update_resolved(
-    &payload,
-    &signature,
+verify_attestation_resolved(
+    &attestation.payload,
+    &attestation.signature,
     &registry,
     redundancy_buffer,
     now,
@@ -113,7 +114,7 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved`.
 
 | Module | Role |
 | --- | --- |
-| `payload` | Plain `DataUpdate` and `SchnorrSignature` structs |
+| `payload` | Plain `AttestationPayload`, `SchnorrSignature`, and `Attestation` structs |
 | `verify` | High-level verify, coalition reconstruction, dispute helpers |
 | `onchain` | Signer resolution over `RegistryView` / `NodeEntry` |
 | `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
@@ -122,14 +123,14 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved`.
 | `coalition` | secp256k1 point sum accumulator |
 | `scalar` | Schnorr→ECDSA inputs, ETH address from pubkey |
 | `state` | Framework-agnostic registry / node view types |
-| `error` | `DataUpdateError` — map at the program call boundary |
+| `error` | `AttestationError` — map at the program call boundary |
 
 ## Features
 
 | Feature | Effect |
 | --- | --- |
 | *(default)* | Pure verification; no Borsh |
-| `borsh` | Derive Borsh on `DataUpdate` and `SchnorrSignature` (length-prefixed `value`) |
+| `borsh` | Derive Borsh on `AttestationPayload`, `SchnorrSignature`, and `Attestation` |
 
 ## Development
 
@@ -140,7 +141,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 
 # End-to-end example (Borsh decode + compressed-pubkey verify)
-cargo run --example verify_data_update --features borsh
+cargo run --example verify_attestation --features borsh
 ```
 
 See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) for the full API reference, error table, and integration guide.

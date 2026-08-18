@@ -29,5 +29,5 @@ num-bigint = "0.4.6"
 proptest = "1.6"
 
 [[example]]
-name = "verify_data_update"
+name = "verify_attestation"
 required-features = ["borsh"]

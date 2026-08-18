@@ -4,11 +4,12 @@
 //! accounts (owner checks, deserialization) and passing the plain [`RegistryView`] and
 //! [`NodeEntry`] slice. All Anchor / framework coupling stays in the downstream program.
 
+use crate::verify::verify_attestation_parts;
 use crate::{
     bitmap::{bitmap_load, for_each_set_bit_u256},
-    secp256k1_scalar_is_valid_nonzero, verify_aggregate_over_hash, verify_data_update, DataUpdate,
-    DataUpdateError, NodeEntry, RegistryTransitionType, RegistryView, SchnorrSignature, SignerXy,
-    VIRTUAL_INDEX,
+    secp256k1_scalar_is_valid_nonzero, verify_aggregate_over_hash, AttestationError,
+    AttestationPayload, NodeEntry, RegistryTransitionType, RegistryView, SchnorrSignature,
+    SignerXy, VIRTUAL_INDEX,
 };
 
 #[inline(always)]
@@ -30,11 +31,11 @@ pub fn expected_node_index(bit_pos: u32, registry: &RegistryView, apply_remove_r
 #[inline(always)]
 pub fn validate_remove_transition_for_previous(
     registry: &RegistryView,
-) -> Result<(), DataUpdateError> {
+) -> Result<(), AttestationError> {
     if registry.is_remove_transition() {
         Ok(())
     } else {
-        Err(DataUpdateError::InvalidTransitionAccount)
+        Err(AttestationError::InvalidTransitionAccount)
     }
 }
 
@@ -50,7 +51,7 @@ pub fn resolve_ordered_signers(
     registry_version: u32,
     signers_bitmap: &[u8; 32],
     now: i64,
-) -> Result<(u32, Vec<SignerXy>), DataUpdateError> {
+) -> Result<(u32, Vec<SignerXy>), AttestationError> {
     let signers = bitmap_load(signers_bitmap);
     let signer_count = signers.count_ones();
 
@@ -58,7 +59,7 @@ pub fn resolve_ordered_signers(
     let is_previous_live =
         registry_version == registry.previous_version && now <= registry.previous_expires_at;
     if !is_current && !is_previous_live {
-        return Err(DataUpdateError::InvalidRegistryVersion);
+        return Err(AttestationError::InvalidRegistryVersion);
     }
 
     let node_count = if is_current {
@@ -68,7 +69,7 @@ pub fn resolve_ordered_signers(
     };
 
     if entries.len() != signer_count as usize {
-        return Err(DataUpdateError::MissingSignerAccount);
+        return Err(AttestationError::MissingSignerAccount);
     }
 
     let apply_remove_remap =
@@ -82,37 +83,37 @@ pub fn resolve_ordered_signers(
     for_each_set_bit_u256(signers, |bit_pos| {
         let bit_pos = bit_pos as u32;
         if bit_pos >= node_count {
-            return Err(DataUpdateError::InvalidSignersBitmap);
+            return Err(AttestationError::InvalidSignersBitmap);
         }
 
         let entry = entries
             .get(entry_cursor)
-            .ok_or(DataUpdateError::MissingSignerAccount)?;
+            .ok_or(AttestationError::MissingSignerAccount)?;
         entry_cursor = entry_cursor.saturating_add(1);
 
         let expected_index = expected_node_index(bit_pos, registry, apply_remove_remap);
         if entry.index != expected_index {
-            return Err(DataUpdateError::InvalidNodeIndex);
+            return Err(AttestationError::InvalidNodeIndex);
         }
         ordered.push((entry.x, entry.y));
         Ok(())
     })?;
 
     if entry_cursor != entries.len() {
-        return Err(DataUpdateError::MissingSignerAccount);
+        return Err(AttestationError::MissingSignerAccount);
     }
     Ok((node_count, ordered))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn verify_data_update_resolved(
-    payload: &DataUpdate,
+pub fn verify_attestation_resolved(
+    payload: &AttestationPayload,
     signature: &SchnorrSignature,
     registry: &RegistryView,
     redundancy_buffer: u8,
     now: i64,
     entries: &[NodeEntry],
-) -> Result<(), DataUpdateError> {
+) -> Result<(), AttestationError> {
     let (node_count, ordered) = resolve_ordered_signers(
         entries,
         registry,
@@ -120,7 +121,7 @@ pub fn verify_data_update_resolved(
         &signature.signers_bitmap,
         now,
     )?;
-    verify_data_update(payload, signature, node_count, redundancy_buffer, &ordered)
+    verify_attestation_parts(payload, signature, node_count, redundancy_buffer, &ordered)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -133,7 +134,7 @@ pub fn verify_aggregate_over_hash_resolved(
     message_hash: &[u8; 32],
     now: i64,
     entries: &[NodeEntry],
-) -> Result<bool, DataUpdateError> {
+) -> Result<bool, AttestationError> {
     if !secp256k1_scalar_is_valid_nonzero(agg_sig_s) {
         return Ok(false);
     }
@@ -212,6 +213,6 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(err, DataUpdateError::InvalidSignersBitmap);
+        assert_eq!(err, AttestationError::InvalidSignersBitmap);
     }
 }

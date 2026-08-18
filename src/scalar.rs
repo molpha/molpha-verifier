@@ -1,11 +1,11 @@
 //! secp256k1 scalar arithmetic and the EVM Schnorr→ECDSA recovery trick.
 //!
 //! Pure, anchor-free. Moved verbatim from the Molpha program's `utils/schnorr.rs`
-//! (`MolphaError` → [`DataUpdateError`]).
+//! (`MolphaError` → [`AttestationError`]).
 
 use solana_keccak_hasher::hashv;
 
-use crate::error::DataUpdateError;
+use crate::error::AttestationError;
 
 const SECP256K1_ORDER: [u8; 32] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
@@ -67,7 +67,7 @@ pub fn secp256k1_scalar_is_valid_nonzero(x: &[u8; 32]) -> bool {
 pub fn secp256k1_ecdsa_normalize_low_s(
     mut recovery_id: u8,
     signature_64: &mut [u8; 64],
-) -> Result<u8, DataUpdateError> {
+) -> Result<u8, AttestationError> {
     let mut s = [0u8; 32];
     s.copy_from_slice(&signature_64[32..64]);
 
@@ -79,7 +79,7 @@ pub fn secp256k1_ecdsa_normalize_low_s(
 
     // Ensure non-zero `s` after normalization.
     if signature_64[32..64].iter().all(|b| *b == 0) {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     Ok(recovery_id)
@@ -361,10 +361,10 @@ pub fn evm_schnorr_ecdsa_inputs(
     msg_hash: &[u8; 32],
     signature: &[u8; 32],
     commitment: &[u8; 20],
-) -> core::result::Result<(u8, [u8; 64], [u8; 32]), DataUpdateError> {
+) -> core::result::Result<(u8, [u8; 64], [u8; 32]), AttestationError> {
     let parity_prefix = pubkey_compressed[0];
     if parity_prefix != 0x02 && parity_prefix != 0x03 {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     let recovery_id = parity_prefix & 1;
@@ -373,7 +373,7 @@ pub fn evm_schnorr_ecdsa_inputs(
     px.copy_from_slice(&pubkey_compressed[1..]);
     let px_mod_n = mod_reduce_once(px);
     if is_zero(&px_mod_n) {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     let challenge_hash = hashv(&[
@@ -392,7 +392,7 @@ pub fn evm_schnorr_ecdsa_inputs(
     let ecdsa_s_mul = mul_mod(&challenge, &px_mod_n);
     let mut s_ecdsa = sub_be(&SECP256K1_ORDER, &ecdsa_s_mul);
     if is_zero(&s_ecdsa) {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     // Ethereum `ecrecover` accepts malleable "high-s" signatures, but Solana's

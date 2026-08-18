@@ -131,6 +131,7 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved`.
 | --- | --- |
 | *(default)* | Pure verification; no Borsh |
 | `borsh` | Derive Borsh on `AttestationPayload`, `SchnorrSignature`, and `Attestation` |
+| `thiserror` | `Display` and `std::error::Error` on [`AttestationError`](src/error.rs) for off-chain tooling |
 
 ## Development
 
@@ -141,10 +142,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 
 # End-to-end example (Borsh decode + compressed-pubkey verify)
-cargo run --example verify_attestation --features borsh
+cargo run --example verify_attestation --features borsh,fixtures
 ```
-
-See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) for the full API reference, error table, and integration guide.
 
 ## License
 

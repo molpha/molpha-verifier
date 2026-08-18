@@ -450,6 +450,7 @@ dependencies = [
  "proptest",
  "solana-keccak-hasher",
  "solana-secp256k1-recover",
+ "thiserror",
 ]
 
 [[package]]

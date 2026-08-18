@@ -35,12 +35,12 @@ pub fn compute_message_hash(
 
     hashv(&[
         MESSAGE_PREFIX.as_slice(),
+        payload.value.as_slice(),
         payload.source_id.as_slice(),
         registry_version_bytes.as_slice(),
         signatures_required_bytes.as_slice(),
-        signers_bitmap.as_slice(),
-        payload.value.as_slice(),
         canonical_timestamp_bytes.as_slice(),
+        signers_bitmap.as_slice(),
     ])
     .to_bytes()
 }

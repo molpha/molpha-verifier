@@ -48,10 +48,10 @@ Aggregate signature material, passed separately from the payload:
 
 ```toml
 [dependencies]
-molpha-verifier = "0.2"
+molpha-verifier = "0.3"
 
 # With Borsh support for wire-format decode/encode:
-# molpha-verifier = { version = "0.2", features = ["borsh"] }
+# molpha-verifier = { version = "0.3", features = ["borsh"] }
 ```
 
 ## Usage

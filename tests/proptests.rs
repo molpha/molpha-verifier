@@ -226,7 +226,9 @@ proptest! {
         node_count in 1u32..=256,
     ) {
         let got = effective_selection_size(signatures_required, redundancy_buffer, node_count);
-        let want = (signatures_required + u32::from(redundancy_buffer)).min(node_count);
+        let want = signatures_required
+            .saturating_add(u32::from(redundancy_buffer))
+            .min(node_count);
         prop_assert_eq!(got, want);
         prop_assert!(got <= node_count);
     }

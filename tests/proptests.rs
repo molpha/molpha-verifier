@@ -92,7 +92,7 @@ fn arb_attestation_payload() -> impl Strategy<Value = AttestationPayload> {
         any::<[u8; 32]>(),
         any::<[u8; 32]>(),
         any::<u32>(),
-        any::<u32>(),
+        any::<u8>(),
         any::<u64>(),
     )
         .prop_map(
@@ -176,12 +176,12 @@ proptest! {
 
     #[test]
     fn effective_selection_size_is_bounded_and_formulaic(
-        signatures_required in any::<u32>(),
+        signatures_required in any::<u8>(),
         redundancy_buffer in any::<u8>(),
         node_count in 1u32..=256,
     ) {
         let got = effective_selection_size(signatures_required, redundancy_buffer, node_count);
-        let want = signatures_required
+        let want = u32::from(signatures_required)
             .saturating_add(u32::from(redundancy_buffer))
             .min(node_count);
         prop_assert_eq!(got, want);
@@ -236,7 +236,7 @@ proptest! {
         registry_version in any::<u32>(),
         canonical_timestamp in any::<u64>(),
         node_count in 1u32..=64,
-        signatures_required in any::<u32>(),
+        signatures_required in any::<u8>(),
         redundancy_buffer in any::<u8>(),
     ) {
         let a = derive_selection_bitmap(

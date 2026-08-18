@@ -27,7 +27,7 @@ Content fields carried with the attestation:
 | `value` | `[u8; 32]` | Attested value; hashed as-is into the message |
 | `source_id` | `[u8; 32]` | Source identifier (often ASCII-padded) |
 | `registry_version` | `u32` | Registry snapshot referenced by the attestation |
-| `signatures_required` | `u32` | Threshold encoded in the payload |
+| `signatures_required` | `u8` | Threshold encoded in the payload |
 | `canonical_timestamp` | `u64` | Round timestamp; used in selection seed |
 
 ### `Attestation`

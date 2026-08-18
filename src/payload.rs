@@ -14,7 +14,7 @@ pub struct AttestationPayload {
     pub value: [u8; 32],
     pub source_id: [u8; 32],
     pub registry_version: u32,
-    pub signatures_required: u32,
+    pub signatures_required: u8,
     pub canonical_timestamp: u64,
 }
 
@@ -52,7 +52,7 @@ mod tests {
         assert_eq!(decoded.value, VALUE);
         assert_eq!(decoded.registry_version, 12);
         assert_eq!(decoded.signatures_required, 5);
-        assert_eq!(decoded.canonical_timestamp, 1_708_525_180);
+        assert_eq!(decoded.canonical_timestamp, 1_705_257_421);
 
         let encoded = decoded.try_to_vec().expect("encode payload");
         assert_eq!(encoded.as_slice(), PAYLOAD_BORSH.as_slice());
@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn fixture_signature_borsh_roundtrip() {
         let decoded = SchnorrSignature::try_from_slice(&SIGNATURE_BORSH).expect("decode signature");
-        assert_eq!(decoded.signers_bitmap[30], 0x0e);
-        assert_eq!(decoded.signers_bitmap[31], 0x1d);
+        assert_eq!(decoded.signers_bitmap[30], 0x0f);
+        assert_eq!(decoded.signers_bitmap[31], 0xa8);
 
         let encoded = decoded.try_to_vec().expect("encode signature");
         assert_eq!(encoded.as_slice(), SIGNATURE_BORSH.as_slice());

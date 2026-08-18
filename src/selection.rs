@@ -22,7 +22,7 @@ pub fn derive_selection_bitmap(
     registry_version: u32,
     canonical_timestamp: u64,
     node_count: u32,
-    signatures_required: u32,
+    signatures_required: u8,
     redundancy_buffer: u8,
 ) -> Result<[u8; 32], AttestationError> {
     let canonical_timestamp_bytes = canonical_timestamp.to_be_bytes();

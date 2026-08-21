@@ -10,7 +10,7 @@ use crate::bitmap::{bitmap_is_subset_u256, bitmap_load};
 use crate::coalition::CoalitionAccumulator;
 use crate::error::AttestationError;
 use crate::message::compute_message_hash;
-use crate::payload::{Attestation, AttestationPayload, SchnorrSignature};
+use crate::payload::Attestation;
 use crate::scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,
     secp256k1_scalar_is_valid_nonzero,
@@ -38,13 +38,7 @@ pub fn verify_attestation(
     redundancy_buffer: u8,
     ordered_signers: &[SignerXy],
 ) -> Result<(), AttestationError> {
-    verify_attestation_parts(
-        &attestation.payload,
-        &attestation.signature,
-        node_count,
-        redundancy_buffer,
-        ordered_signers,
-    )
+    verify_attestation_parts(attestation, node_count, redundancy_buffer, ordered_signers)
 }
 
 /// Like [`verify_attestation`] but taking compressed (33-byte) signer pubkeys.
@@ -55,22 +49,17 @@ pub fn verify_attestation_compressed(
     ordered_signers_compressed: &[[u8; 33]],
 ) -> Result<(), AttestationError> {
     let xy = decompress_all(ordered_signers_compressed)?;
-    verify_attestation_parts(
-        &attestation.payload,
-        &attestation.signature,
-        node_count,
-        redundancy_buffer,
-        &xy,
-    )
+    verify_attestation_parts(attestation, node_count, redundancy_buffer, &xy)
 }
 
 pub(crate) fn verify_attestation_parts(
-    payload: &AttestationPayload,
-    signature: &SchnorrSignature,
+    attestation: &Attestation,
     node_count: u32,
     redundancy_buffer: u8,
     ordered_signers: &[SignerXy],
 ) -> Result<(), AttestationError> {
+    let signature = &attestation.signature;
+    let payload = &attestation.payload;
     if signature.agg_sig_s == [0u8; 32] || !secp256k1_scalar_is_valid_nonzero(&signature.agg_sig_s)
     {
         return Err(AttestationError::InvalidAggregateSignature);
@@ -205,24 +194,6 @@ mod tests {
     use crate::message::MESSAGE_PREFIX;
     use libsecp256k1::{PublicKey, PublicKeyFormat};
 
-    fn fixture_payload() -> AttestationPayload {
-        AttestationPayload {
-            value: VALUE,
-            source_id: SOURCE_ID,
-            registry_version: REGISTRY_VERSION,
-            canonical_timestamp: CANONICAL_TIMESTAMP,
-            signatures_required: SIGNATURES_REQUIRED,
-        }
-    }
-
-    fn fixture_signature() -> SchnorrSignature {
-        SchnorrSignature {
-            agg_sig_s: S,
-            commitment_addr: COMMITMENT,
-            signers_bitmap: SIGNERS_BITMAP,
-        }
-    }
-
     fn fixture_signers_xy() -> Vec<SignerXy> {
         use crate::bitmap::for_each_set_bit;
         let mut signers = Vec::new();
@@ -280,8 +251,18 @@ mod tests {
 
     fn fixture_attestation() -> Attestation {
         Attestation {
-            payload: fixture_payload(),
-            signature: fixture_signature(),
+            payload: crate::payload::AttestationPayload {
+                value: VALUE,
+                source_id: SOURCE_ID,
+                registry_version: REGISTRY_VERSION,
+                canonical_timestamp: CANONICAL_TIMESTAMP,
+                signatures_required: SIGNATURES_REQUIRED,
+            },
+            signature: crate::payload::SchnorrSignature {
+                agg_sig_s: S,
+                commitment_addr: COMMITMENT,
+                signers_bitmap: SIGNERS_BITMAP,
+            },
         }
     }
 
@@ -337,14 +318,14 @@ mod tests {
 
     #[test]
     fn verify_aggregate_over_hash_roundtrip() {
-        let payload = fixture_payload();
-        let signature = fixture_signature();
+        let attestation = fixture_attestation();
         let signers = fixture_signers_xy();
-        let message_hash = compute_message_hash(&payload, signature.signers_bitmap);
+        let message_hash =
+            compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);
         assert!(verify_aggregate_over_hash(
             &signers,
-            &signature.agg_sig_s,
-            &signature.commitment_addr,
+            &attestation.signature.agg_sig_s,
+            &attestation.signature.commitment_addr,
             &message_hash,
         )
         .unwrap());
@@ -354,8 +335,8 @@ mod tests {
         bad_hash[0] ^= 0xff;
         assert!(!verify_aggregate_over_hash(
             &signers,
-            &signature.agg_sig_s,
-            &signature.commitment_addr,
+            &attestation.signature.agg_sig_s,
+            &attestation.signature.commitment_addr,
             &bad_hash,
         )
         .unwrap());

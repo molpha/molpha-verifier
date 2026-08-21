@@ -5,6 +5,9 @@
 //! [`Attestation`] either from already-resolved signer pubkeys ([`verify_attestation`]) or from
 //! parsed registry entries plus a [`RegistryView`] ([`verify_attestation_resolved`]).
 //!
+//! Signer resolution ([`resolve_registry_signers`]) binds each set bit of the signers bitmap to an
+//! immutable version-addressed registry snapshot (`nodes[bit]`).
+//!
 //! # Usage
 //! ```ignore
 //! use molpha_verifier::{verify_attestation, Attestation};

@@ -289,13 +289,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_attestation_resolved_accepts_evm_fixture() {
+    fn verify_attestation_resolved_accepts_fixture() {
         let nodes = fixture_nodes();
         let registry = fixture_registry(&nodes);
         let attestation = fixture_attestation();
         let entries = fixture_entries(&nodes);
         verify_attestation_resolved(&attestation, &registry, &entries)
-            .expect("resolved-path EVM fixture must verify");
+            .expect("resolved-path fixture must verify");
     }
 
     #[test]

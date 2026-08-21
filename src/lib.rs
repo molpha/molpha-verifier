@@ -1,4 +1,5 @@
 //! Molpha attestation aggregate-Schnorr verification.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //!
 //! A framework-agnostic library (no Anchor / Pinocchio dependency): the downstream program owns the
 //! registry account types and reads them, then passes plain data in. Verify a Molpha
@@ -7,6 +8,10 @@
 //!
 //! Signer resolution ([`resolve_registry_signers`]) binds each set bit of the signers bitmap to an
 //! immutable version-addressed registry snapshot (`nodes[bit]`).
+//!
+//! The `solana` feature adds an opt-in `solana` module that does the account I/O for you: pass
+//! the program's `Registry` and signer `Node` accounts as `&AccountInfo` and it owner-checks,
+//! discriminator-checks, PDA-checks, parses, and verifies in one call.
 //!
 //! # Usage
 //! ```ignore
@@ -29,6 +34,9 @@ pub mod onchain;
 pub mod payload;
 pub mod scalar;
 pub mod selection;
+#[cfg(feature = "solana")]
+#[cfg_attr(docsrs, doc(cfg(feature = "solana")))]
+pub mod solana;
 pub mod state;
 pub mod verify;
 

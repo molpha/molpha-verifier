@@ -1,4 +1,4 @@
-//! EVM-compatible `uint256` bitmap operations and deterministic selection-group derivation.
+//! `U256` bitmap operations and deterministic selection-group derivation.
 //!
 //! Pure, anchor-free. Moved verbatim from the Molpha program's `utils/bitmap.rs`
 //! (`MolphaError` → [`AttestationError`]).
@@ -8,28 +8,28 @@ use solana_keccak_hasher::hashv;
 
 use crate::error::AttestationError;
 
-/// `keccak256("MOLPHA_SELECTION_DERIVE")` — EVM `NodeGroupBitmapLib.SELECTION_DOMAIN`.
+/// `keccak256("MOLPHA_SELECTION_DERIVE")` — Selection domain.
 const SELECTION_DOMAIN: [u8; 32] = [
     0x49, 0x28, 0x48, 0xfe, 0x5e, 0x85, 0xd4, 0xce, 0x22, 0x31, 0xd6, 0x93, 0xa5, 0x8f, 0x08, 0x20,
     0xa4, 0x05, 0x6e, 0x28, 0x22, 0xfe, 0x5d, 0xca, 0xd7, 0xc7, 0x56, 0xaf, 0xe0, 0x44, 0xb7, 0x0b,
 ];
 
-/// Max Keccak-256 rounds (bounded compute); Solidity loop is unbounded.
+/// Max Keccak-256 rounds (bounded compute); loop is unbounded.
 const DERIVE_GROUP_BITMAP_MAX_ROUNDS: u64 = 65_536;
 
-/// EVM `uint256` bitmap loaded from Solidity `bytes32` (big-endian).
+/// Load a `U256` bitmap from `[u8; 32]` (big-endian).
 #[inline]
 pub fn bitmap_load(bytes: &[u8; 32]) -> U256 {
     U256::from_be_bytes(*bytes)
 }
 
-/// Serialize an EVM `uint256` bitmap to `bytes32` for storage / hashing.
+/// Serialize a `U256` bitmap to `[u8; 32]` for storage / hashing.
 #[inline]
 pub fn bitmap_store(value: U256) -> [u8; 32] {
     value.to_be_bytes()
 }
 
-/// Solidity `uint256` layout: bit `pos` has weight `1 << pos`, `pos == 0` is the integer LSB.
+/// `U256` layout: bit `pos` has weight `1 << pos`, `pos == 0` is the integer LSB.
 #[inline]
 pub fn bitmap_bit_set(bitmap: &[u8; 32], pos: usize) -> bool {
     debug_assert!(pos < 256);
@@ -95,7 +95,7 @@ where
 }
 
 /// Bitmap **bit index** of the signer at 0-based rank `pos` when signers are ordered by ascending
-/// bit index (same order as EVM `Validator.verify` combines pubkeys).
+/// bit index (same order as the Molpha program combines pubkeys).
 pub fn get_index(bitmap: &[u8; 32], pos: usize) -> Option<usize> {
     let mut bm = bitmap_load(bitmap);
     let mut rank = 0usize;
@@ -110,7 +110,7 @@ pub fn get_index(bitmap: &[u8; 32], pos: usize) -> Option<usize> {
     None
 }
 
-/// Iterate set bit positions in ascending order (EVM signer order).
+/// Iterate set bit positions in ascending order (signer order).
 pub fn for_each_set_bit<F>(bitmap: &[u8; 32], mut f: F)
 where
     F: FnMut(usize),
@@ -144,7 +144,7 @@ fn full_mask_u256(node_count: u32) -> U256 {
     }
 }
 
-/// Without-replacement sampling — port of EVM `_sampleWithoutReplacement`.
+/// Without-replacement sampling.
 fn sample_without_replacement(
     seed: &[u8; 32],
     node_count: u32,
@@ -186,7 +186,7 @@ fn sample_without_replacement(
     Ok(bitmap)
 }
 
-/// Port of `NodeGroupBitmapLib.derive` from the EVM reference.
+/// Derive the group bitmap from the selection seed.
 pub fn derive_group_bitmap(
     seed: &[u8; 32],
     node_count: u32,
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn get_index_orders_signers_by_ascending_bit() {
-        // EVM uint256 `7` => bits 0,1,2 set.
+        // `U256(7)` => bits 0,1,2 set.
         let bm: [u8; 32] = [
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0x07,

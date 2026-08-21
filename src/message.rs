@@ -1,10 +1,10 @@
-//! EVM-compatible attestation message hash.
+//! Attestation message hash.
 
 use solana_keccak_hasher::hashv;
 
 use crate::payload::AttestationPayload;
 
-/// `bytes32(keccak256("MOLPHA_MESSAGE_V1"))` — EVM `Validator._constructMessage` prefix.
+/// `bytes32(keccak256("MOLPHA_MESSAGE_V1"))` — Message prefix.
 ///
 /// Value: `keccak256(bytes("MOLPHA_MESSAGE_V1"))`, verified by the unit test below.
 pub const MESSAGE_PREFIX: [u8; 32] = [
@@ -12,9 +12,9 @@ pub const MESSAGE_PREFIX: [u8; 32] = [
     0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22, 0xf7, 0x0e, 0x7f, 0xe7,
 ];
 
-/// Compute the EVM-compatible attestation message hash.
+/// Compute the attestation message hash.
 ///
-/// Matches `Validator._constructMessage` in the EVM reference implementation:
+/// Matches message construction in the Molpha program:
 /// ```text
 /// keccak256(abi.encodePacked(
 ///     MESSAGE_PREFIX, value, sourceId, registryVersion, signaturesRequired,

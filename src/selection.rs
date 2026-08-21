@@ -5,7 +5,7 @@ use solana_keccak_hasher::hashv;
 use crate::bitmap::{derive_group_bitmap, effective_selection_size};
 use crate::error::AttestationError;
 
-/// `bytes32(keccak256("MOLPHA_SELECTION_V1"))` — EVM `Validator` selection seed prefix.
+/// `bytes32(keccak256("MOLPHA_SELECTION_V1"))` — Selection seed prefix.
 ///
 /// Value: `keccak256(bytes("MOLPHA_SELECTION_V1"))`, verified by the unit test below.
 pub const SELECTION_SEED_PREFIX: [u8; 32] = [

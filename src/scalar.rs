@@ -1,4 +1,4 @@
-//! secp256k1 scalar arithmetic and the EVM Schnorr→ECDSA recovery trick.
+//! secp256k1 scalar arithmetic and the Schnorr→ECDSA recovery trick.
 //!
 //! Pure, anchor-free. Moved verbatim from the Molpha program's `utils/schnorr.rs`
 //! (`MolphaError` → [`AttestationError`]).
@@ -110,8 +110,6 @@ fn mod_reduce_once(mut x: [u8; 32]) -> [u8; 32] {
 }
 
 /// Reduce a 32-byte big-endian integer modulo secp256k1 curve order \(n\).
-///
-/// This is used to port EVM `uint256(...) % Q()` semantics for challenges.
 pub fn secp256k1_scalar_reduce_be(x: [u8; 32]) -> [u8; 32] {
     mod_reduce_once(x)
 }
@@ -121,7 +119,7 @@ fn is_zero(x: &[u8; 32]) -> bool {
 }
 
 fn get_bit_be(x: &[u8; 32], bit_index: usize) -> u8 {
-    // Bit ordering for a 256-bit **big-endian** integer as used by EVM `uint256`:
+    // Bit ordering for a 256-bit **big-endian** integer:
     // - `bit_index == 0` is the most significant bit (byte 0, bit 7)
     // - `bit_index == 255` is the least significant bit (byte 31, bit 0)
     debug_assert!(bit_index < 256);
@@ -134,7 +132,7 @@ pub fn mul_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     mul_mod_n_barrett(a, b)
 }
 
-/// EVM/Solidity `mulmod(a, b, Q)` for 256-bit values, where `Q` is secp256k1 order.
+/// `mulmod(a, b, Q)` for 256-bit values, where `Q` is secp256k1 order.
 ///
 /// This is used to match `mulmod(..., LibSecp256k1.Q())` semantics exactly.
 fn mod_pow(base: &[u8; 32], exponent: &[u8; 32]) -> [u8; 32] {
@@ -387,7 +385,7 @@ pub fn evm_schnorr_ecdsa_inputs(
 
     let sig_red = mod_reduce_once(*signature);
     let msg_mul = mul_mod(&sig_red, &px_mod_n);
-    // Solidity `unchecked { msgHash = Q - mulmod(...) }` (no special-case for zero).
+    // `unchecked { msgHash = Q - mulmod(...) }` (no special-case for zero).
     let e_ecdsa = sub_be(&SECP256K1_ORDER, &msg_mul);
     let ecdsa_s_mul = mul_mod(&challenge, &px_mod_n);
     let mut s_ecdsa = sub_be(&SECP256K1_ORDER, &ecdsa_s_mul);
@@ -406,7 +404,7 @@ pub fn evm_schnorr_ecdsa_inputs(
     }
 
     let mut ecdsa_signature = [0u8; 64];
-    // Solidity passes `r` as the aggregate pubkey X coordinate (`uint256`), not `X mod Q`.
+    // Pass `r` as the aggregate pubkey X coordinate (`U256`), not `X mod Q`.
     ecdsa_signature[..32].copy_from_slice(&px);
     ecdsa_signature[32..].copy_from_slice(&s_ecdsa);
 
@@ -605,7 +603,7 @@ mod tests {
         // big-endian `uint32` threshold packing.
         let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
 
-        // EVM bitmap integer `7` => nodes {1,2,3} => bits 0..2 set in EVM uint256 layout.
+        // bitmap integer `7` => nodes {1,2,3} => bits 0..2 set.
         let signers_bitmap: [u8; 32] = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

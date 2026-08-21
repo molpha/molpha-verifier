@@ -3,7 +3,9 @@
 
 Framework-independent Rust verifier for Molpha updates, compatible with Solana program and native Rust consumers.
 
-The downstream Solana program (or any other consumer) owns registry account types and I/O. This crate only takes plain data — no Anchor, Pinocchio, or `AccountInfo` dependency — and verifies the same checks as the EVM `Validator` reference path.
+The downstream Solana program (or any other consumer) owns registry account types and I/O. By default this crate only takes plain data — no Anchor, Pinocchio, or `AccountInfo` dependency.
+
+If you *are* on Solana and would rather not write the account plumbing, the opt-in [`solana` feature](#account-path-solana-feature) takes the program's `Registry` and `Node` accounts as `&AccountInfo` and does it for you.
 
 ## What it verifies
 
@@ -13,7 +15,7 @@ Given an [`AttestationPayload`](src/payload.rs) (or combined [`Attestation`](src
 2. Enforces `popcount(signers_bitmap) ≥ signatures_required`
 3. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
 4. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys
-5. Hashes the EVM-compatible message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
+5. Hashes the message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
 6. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment_addr`
 
 Optional helpers resolve ordered signers from a plain [`RegistryView`](src/state.rs) + [`NodeEntry`](src/state.rs) slice against an immutable, version-addressed registry snapshot (`nodes[bit]`). Node status is ignored: a node deactivated in a later version remains valid evidence for that historical snapshot.
@@ -42,7 +44,7 @@ Aggregate signature material, passed separately from the payload:
 | --- | --- | --- |
 | `agg_sig_s` | `[u8; 32]` | Aggregate Schnorr scalar `s` |
 | `commitment_addr` | `[u8; 20]` | Ethereum address of nonce point `R` |
-| `signers_bitmap` | `[u8; 32]` | EVM `uint256` bitmap (big-endian) |
+| `signers_bitmap` | `[u8; 32]` | bitmap (big-endian) |
 
 ### `RegistryView`
 
@@ -74,6 +76,9 @@ molpha-verifier = "0.3"
 
 # With Borsh support for wire-format decode/encode:
 # molpha-verifier = { version = "0.3", features = ["borsh"] }
+
+# On Solana, to pass accounts instead of plain data:
+# molpha-verifier = { version = "0.3", features = ["solana"] }
 ```
 
 ## Usage
@@ -84,7 +89,7 @@ molpha-verifier = "0.3"
 use molpha_verifier::{verify_attestation, Attestation, SignerXy};
 
 // `ordered_signers`: one (x, y) per set bit of `attestation.signature.signers_bitmap`,
-// in ascending bit-index order (same order as EVM Validator.verify).
+// in ascending bit-index order.
 verify_attestation(
     &attestation,
     node_count,
@@ -112,6 +117,49 @@ Requires `attestation.payload.registry_version == registry.version`. The caller 
 
 Signer resolution alone: `resolve_registry_signers` / `resolve_registry_signers_indexed` (the indexed form also returns bit positions, useful when splitting a union bitmap).
 
+### Account path (`solana` feature)
+
+With the `solana` feature the crate reads the accounts itself — hand it the `Registry` account and the signers' `Node` accounts and it does the rest:
+
+```rust
+use molpha_verifier::solana::verify_attestation_accounts;
+
+// `node_accounts` are the signers' Node accounts in ascending signers_bitmap bit order.
+verify_attestation_accounts(
+    &attestation,
+    &registry_account,       // &AccountInfo
+    ctx.remaining_accounts,  // &[AccountInfo]
+    ctx.program_id,
+)?;
+```
+
+Anchor accounts are an 8-byte discriminator plus Borsh (or, for `zero_copy`, `repr(C)`), so no `anchor-lang` dependency is needed to read them: Anchor consumers pass `to_account_info()`, native programs pass their `AccountInfo`s directly.
+
+Every account is checked before any field is trusted:
+
+| Check | Registry | Node |
+| --- | --- | --- |
+| Owner is `program_id` | ✓ | ✓ |
+| Anchor discriminator | `sha256("account:Registry")[..8]` | `sha256("account:Node")[..8]` |
+| Minimum length | `REGISTRY_ACCOUNT_LEN` (8,208) | `NODE_ACCOUNT_LEN` (168) |
+| Canonical PDA for own seeds + stored bump | `[b"molpha_registry", version_le]` | `[b"molpha_node", owner]` |
+| Body decode | fixed offsets (`zero_copy`) | Borsh into `NodeAccount` |
+
+The PDA check is load-bearing rather than ceremony: the program also creates `Registry`-shaped accounts under other seed prefixes, and re-seeding from the account's *own* version / owner means a snapshot cannot be relabelled or a node identity transplanted in place. Node **status is deliberately ignored** — a node deactivated in a later version remains valid evidence for a historical snapshot.
+
+Errors come back as [`solana::AccountError`](src/solana.rs), which wraps `AttestationError` so one `?` covers both account I/O and crypto. `From<AccountError> for ProgramError` maps to `ProgramError::Custom(ERROR_CODE_BASE + n)`, based at `0x4D4F_0000` — outside Anchor's reserved *and* `6000+` user ranges, so it never collides with a consumer's own codes.
+
+Composable pieces, when the one-call form is too coarse:
+
+| Item | Role |
+| --- | --- |
+| `RegistryAccount::load` | Validated, borrowed `Registry`; `.view()` yields a `RegistryView` pointing straight at the 8 KB `nodes` array (no copy) |
+| `resolve_nodes` / `resolve_node` | Validate and decode `Node` accounts into `NodeEntry`s |
+| `NodeAccount` / `NodeStatus` | Read-only mirror of the program's `Node` body |
+| `verify_aggregate_over_hash_accounts` | Dispute / slash path over an arbitrary message hash |
+
+`NodeAccount` and the `Registry` offsets are pinned to the deployed program's account layout. The discriminators fail closed if a type is renamed and the length checks fail closed if fields are removed; appending fields stays compatible.
+
 ### Dispute path
 
 For instructions that verify an aggregate signature over an arbitrary message hash (slash / dispute semantics):
@@ -138,11 +186,12 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved` (same snapshot 
 | `verify` | High-level verify, coalition reconstruction, dispute helpers |
 | `onchain` | Snapshot signer resolution (`resolve_registry_signers*`) over `RegistryView` / `NodeEntry` |
 | `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
-| `message` | EVM-compatible message hash (`MOLPHA_MESSAGE_V1`) |
+| `message` | Molpha message hash (`MOLPHA_MESSAGE_V1`) |
 | `bitmap` | u256 bitmap helpers and group sampling |
 | `coalition` | secp256k1 point sum accumulator |
 | `scalar` | Schnorr→ECDSA inputs, ETH address from pubkey |
 | `state` | Framework-agnostic snapshot view (`RegistryView`, `NodeEntry`, `MAX_REGISTRY_NODES`) |
+| `solana` | *(feature-gated)* `AccountInfo` adapters — owner / discriminator / PDA checks, account decode |
 | `error` | `AttestationError` — map at the program call boundary |
 
 ## Features
@@ -152,11 +201,13 @@ Registry-resolved variant: `verify_aggregate_over_hash_resolved` (same snapshot 
 | *(default)* | Pure verification; no Borsh |
 | `borsh` | Derive Borsh on `AttestationPayload`, `SchnorrSignature`, and `Attestation` |
 | `thiserror` | `Display` and `std::error::Error` on [`AttestationError`](src/error.rs) for off-chain tooling |
+| `solana` | The [`solana` module](src/solana.rs): verify straight from `&AccountInfo`. Adds `solana-program`, implies `borsh` |
 
 ## Development
 
 ```bash
 cargo test
+cargo test --features solana
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check

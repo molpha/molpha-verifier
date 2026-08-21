@@ -25,7 +25,7 @@ pub type SignerXy = ([u8; 32], [u8; 32]);
 /// # Caller contract
 /// - `node_count` is the registry node count for `attestation.payload.registry_version`.
 /// - `ordered_signers` holds one `(x, y)` per set bit of `attestation.signature.signers_bitmap`,
-///   in **ascending bit-index order** — the same order EVM `Validator.verify` combines pubkeys.
+///   in **ascending bit-index order** — the same order as the Molpha program combines pubkeys.
 ///   The caller is responsible for resolving the authentic pubkeys; this function trusts the
 ///   supplied set.
 ///
@@ -266,9 +266,9 @@ mod tests {
         }
     }
 
-    /// Full end-to-end EVM-compat verification with caller-supplied pubkeys — no anchor, no PDAs.
+    /// Full end-to-end verification with caller-supplied pubkeys — no anchor, no PDAs.
     #[test]
-    fn verify_attestation_accepts_evm_fixture() {
+    fn verify_attestation_accepts_fixture() {
         let attestation = fixture_attestation();
         let signer_pubkeys = fixture_signer_pubkeys_compressed();
         verify_attestation(

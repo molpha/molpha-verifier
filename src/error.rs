@@ -55,13 +55,13 @@ pub enum AttestationError {
         error("ordered_signers.len() does not match popcount(signers_bitmap)")
     )]
     SignerCountMismatch,
-    /// The requested registry version is neither current nor a live previous version.
+    /// The attestation's registry version does not match the provided snapshot.
     #[cfg_attr(feature = "thiserror", error("invalid registry version"))]
     InvalidRegistryVersion,
-    /// A signer account is missing, extra, or owned by another program.
+    /// A signer account is missing, extra, or does not match the registry slot.
     #[cfg_attr(
         feature = "thiserror",
-        error("signer account missing, extra, or owned by another program")
+        error("signer account missing, extra, or does not match the registry slot")
     )]
     MissingSignerAccount,
     /// A `Node` account does not match its expected bitmap index.
@@ -70,12 +70,6 @@ pub enum AttestationError {
         error("node account index does not match bitmap")
     )]
     InvalidNodeIndex,
-    /// Previous-version remove remapping was requested without valid transition metadata.
-    #[cfg_attr(
-        feature = "thiserror",
-        error("previous-version remove remapping requested without valid transition metadata")
-    )]
-    InvalidTransitionAccount,
 }
 
 #[cfg(all(test, feature = "thiserror"))]

@@ -3,17 +3,20 @@
 mod fixtures;
 
 use ethnum::U256;
-use libsecp256k1::{PublicKey, PublicKeyFormat};
+use libsecp256k1::PublicKey;
 use molpha_verifier::{
     bitmap::{
         bitmap_bit_set, bitmap_clear_bit, bitmap_is_subset, bitmap_is_subset_u256, bitmap_load,
         bitmap_popcount_evm, bitmap_set_bit, bitmap_store, derive_group_bitmap,
         effective_selection_size, for_each_set_bit, validate_bitmap_upper_bits_clear,
     },
-    coalition::CoalitionAccumulator,
+    coalition::{CoalitionAccumulator, public_key_from_affine_xy},
     message::compute_message_hash,
     payload::{AttestationPayload, SchnorrSignature},
-    scalar::{mul_mod, secp256k1_scalar_is_valid_nonzero},
+    scalar::{
+        mul_mod, secp256k1_ecdsa_normalize_low_s, secp256k1_scalar_is_valid_nonzero,
+        secp256k1_scalar_reduce_be,
+    },
     selection::derive_selection_bitmap,
     verify::{reconstruct_coalition_key, SignerXy},
 };
@@ -45,11 +48,12 @@ fn mul_mod_bigint(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 
 fn arb_fixture_pubkey_subset() -> impl Strategy<Value = Vec<PublicKey>> {
     prop::collection::btree_set(0usize..12, 1..=12).prop_map(|indices| {
+        let mut scratch = [0u8; 65];
         indices
             .into_iter()
             .map(|i| {
-                PublicKey::parse_slice(&fixtures::PUBKEYS[i], Some(PublicKeyFormat::Compressed))
-                    .unwrap()
+                let (x, y) = fixtures::PUBKEYS[i];
+                public_key_from_affine_xy(&mut scratch, &x, &y).unwrap()
             })
             .collect()
     })
@@ -200,16 +204,35 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 
+    /// Swept across the full `1..=256` range, not just the first 64-bit limb: the sampler holds
+    /// the bitmap as four `u64` limbs, so limb boundaries (64 / 128 / 192 / 256) are where an
+    /// off-by-one in the mask or the widening would show up.
     #[test]
     fn derive_group_bitmap_popcount_and_range(
         seed in any::<[u8; 32]>(),
-        node_count in 1u32..=64,
-        group_size in 0u32..=64,
+        node_count in 1u32..=256,
+        group_size in 0u32..=256,
     ) {
         prop_assume!(group_size <= node_count);
         let bitmap = derive_group_bitmap(&seed, node_count, group_size).unwrap();
         prop_assert_eq!(bitmap_popcount_evm(&bitmap), group_size);
         prop_assert!(bits_in_range(&bitmap, node_count));
+    }
+
+    /// Exact limb boundaries, exhaustively rather than by chance.
+    #[test]
+    fn derive_group_bitmap_at_limb_boundaries(seed in any::<[u8; 32]>()) {
+        for node_count in [1u32, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256] {
+            for group_size in [0, 1, node_count / 2, node_count - 1, node_count] {
+                let bitmap = derive_group_bitmap(&seed, node_count, group_size).unwrap();
+                prop_assert_eq!(
+                    bitmap_popcount_evm(&bitmap),
+                    group_size,
+                    "n={} g={}", node_count, group_size,
+                );
+                prop_assert!(bits_in_range(&bitmap, node_count), "n={} g={}", node_count, group_size);
+            }
+        }
     }
 
     #[test]
@@ -265,6 +288,43 @@ proptest! {
         let expected = mul_mod_bigint(&a, &b);
         let got = mul_mod(&a, &b);
         prop_assert_eq!(got, expected);
+    }
+
+    /// The 256-bit reduce works in 64-bit limbs; check it against arbitrary-precision `%`.
+    #[test]
+    fn scalar_reduce_matches_bigint_modulo(x in any::<[u8; 32]>()) {
+        let expected = big_to_be32(be32_to_big(&x) % be32_to_big(&SECP256K1_ORDER));
+        prop_assert_eq!(secp256k1_scalar_reduce_be(x), expected);
+    }
+
+    /// Low-s normalization: `s > n/2` becomes `n - s` (wrapping at 2^256, as the byte-wise
+    /// subtraction did) with the recovery-id parity flipped, and a zero result is rejected.
+    #[test]
+    fn ecdsa_normalize_low_s_matches_bigint_reference(
+        signature in any::<[u8; 64]>(),
+        recovery_id in 0u8..=1,
+    ) {
+        let mut s_bytes = [0u8; 32];
+        s_bytes.copy_from_slice(&signature[32..64]);
+
+        let n = be32_to_big(&SECP256K1_ORDER);
+        let half = &n >> 1u32;
+        let s = be32_to_big(&s_bytes);
+        let two_256 = BigUint::from(1u8) << 256u32;
+
+        let flips = s > half;
+        let want_s = if flips { (&two_256 + &n - &s) % &two_256 } else { s };
+
+        let mut got = signature;
+        let result = secp256k1_ecdsa_normalize_low_s(recovery_id, &mut got);
+
+        if want_s == BigUint::from(0u8) {
+            prop_assert!(result.is_err(), "zero s must be rejected");
+        } else {
+            prop_assert_eq!(result.unwrap(), recovery_id ^ u8::from(flips));
+            prop_assert_eq!(&got[32..64], &big_to_be32(want_s)[..]);
+            prop_assert_eq!(&got[..32], &signature[..32], "r must be untouched");
+        }
     }
 
     #[test]

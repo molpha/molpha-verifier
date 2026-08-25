@@ -49,8 +49,7 @@ pub use state::*;
 
 // High-level verification API.
 pub use verify::{
-    reconstruct_coalition_key, reconstruct_coalition_key_compressed, verify_aggregate_over_hash,
-    verify_attestation, verify_attestation_compressed, SignerXy,
+    reconstruct_coalition_key, verify_aggregate_over_hash, verify_attestation, SignerXy,
 };
 
 // Primitives commonly composed by on-chain callers.

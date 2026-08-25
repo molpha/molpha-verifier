@@ -13,10 +13,13 @@ Given an [`AttestationPayload`](src/payload.rs) (or combined [`Attestation`](src
 
 1. Rejects an invalid / zero aggregate scalar `s`
 2. Enforces `popcount(signers_bitmap) ≥ signatures_required`
-3. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
-4. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys
-5. Hashes the message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
-6. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment_addr`
+3. Requires the supplied signer set to be exactly `popcount(signers_bitmap)` long
+4. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
+5. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys
+6. Hashes the message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
+7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment_addr`
+
+Checks run cheapest-first, so a malformed attestation is rejected before it costs a selection derivation or a curve operation.
 
 Optional helpers resolve ordered signers from a plain [`RegistryView`](src/state.rs) + [`NodeEntry`](src/state.rs) slice against an immutable, version-addressed registry snapshot (`nodes[bit]`). Node status is ignored: a node deactivated in a later version remains valid evidence for that historical snapshot.
 
@@ -98,8 +101,6 @@ verify_attestation(
 )?;
 ```
 
-Compressed (33-byte) pubkeys: `verify_attestation_compressed`.
-
 ### Registry-resolved path
 
 ```rust
@@ -143,7 +144,7 @@ Every account is checked before any field is trusted:
 | Anchor discriminator | `sha256("account:Registry")[..8]` | `sha256("account:Node")[..8]` |
 | Minimum length | `REGISTRY_ACCOUNT_LEN` (8,208) | `NODE_ACCOUNT_LEN` (168) |
 | Canonical PDA for own seeds + stored bump | `[b"molpha_registry", version_le]` | `[b"molpha_node", owner]` |
-| Body decode | fixed offsets (`zero_copy`) | Borsh into `NodeAccount` |
+| Body decode | fixed offsets (`zero_copy`) | fixed offsets (pubkey + status tag) |
 
 The PDA check is load-bearing rather than ceremony: the program also creates `Registry`-shaped accounts under other seed prefixes, and re-seeding from the account's *own* version / owner means a snapshot cannot be relabelled or a node identity transplanted in place. Node **status is deliberately ignored** — a node deactivated in a later version remains valid evidence for a historical snapshot.
 
@@ -155,10 +156,6 @@ Composable pieces, when the one-call form is too coarse:
 | --- | --- |
 | `RegistryAccount::load` | Validated, borrowed `Registry`; `.view()` yields a `RegistryView` pointing straight at the 8 KB `nodes` array (no copy) |
 | `resolve_nodes` / `resolve_node` | Validate and decode `Node` accounts into `NodeEntry`s |
-| `NodeAccount` / `NodeStatus` | Read-only mirror of the program's `Node` body |
-| `verify_aggregate_over_hash_accounts` | Dispute / slash path over an arbitrary message hash |
-
-`NodeAccount` and the `Registry` offsets are pinned to the deployed program's account layout. The discriminators fail closed if a type is renamed and the length checks fail closed if fields are removed; appending fields stays compatible.
 
 ### Dispute path
 
@@ -175,8 +172,6 @@ let valid = verify_aggregate_over_hash(
     &message_hash,
 )?;
 ```
-
-Registry-resolved variant: `verify_aggregate_over_hash_resolved` (same snapshot version check; no wall-clock / previous-version grace window).
 
 ## Modules
 
@@ -212,7 +207,7 @@ cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 
-# End-to-end example (Borsh decode + compressed-pubkey verify)
+# End-to-end example (Borsh decode + verify)
 cargo run --example verify_attestation --features borsh,fixtures
 ```
 

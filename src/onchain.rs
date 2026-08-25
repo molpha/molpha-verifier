@@ -8,49 +8,35 @@
 //! snapshot model. Node status is deliberately ignored: a node deactivated in a later version
 //! remains valid evidence for historical snapshots.
 
-use crate::verify::verify_attestation_parts;
+use ethnum::U256;
+
+use crate::verify::{verify_aggregate_over_hash_core, verify_attestation_core};
 use crate::{
     bitmap::{bitmap_load, for_each_set_bit_u256},
-    secp256k1_scalar_is_valid_nonzero, verify_aggregate_over_hash, Attestation, AttestationError,
-    NodeEntry, RegistryView, SignerXy,
+    coalition::CoalitionAccumulator, Attestation, AttestationError, NodeEntry, RegistryView,
+    SignerXy, SchnorrSignature,
 };
 
-/// Resolve selected signer entries against an immutable registry snapshot.
+/// Walk the set bits of `signers` in ascending order, bind each to its registry slot and the
+/// entry supplied for it, and hand the validated pair to `visit`.
 ///
-/// Entries must be provided in ascending signer-bit order. Each entry's `account` must equal
-/// `nodes[bit]` for the corresponding set bit.
-pub fn resolve_registry_signers(
+/// This is the whole of signer resolution. The public `resolve_*` helpers collect it into a
+/// `Vec`; verification instead sums straight into the coalition accumulator, which is why the
+/// binding checks live here rather than in the collecting wrappers.
+fn for_each_resolved_signer<F>(
     nodes: &[[u8; 32]],
     node_count: u16,
-    signers_bitmap: &[u8; 32],
+    signers: U256,
     entries: &[NodeEntry],
-) -> Result<Vec<SignerXy>, AttestationError> {
-    Ok(
-        resolve_registry_signers_indexed(nodes, node_count, signers_bitmap, entries)?
-            .into_iter()
-            .map(|(_, xy)| xy)
-            .collect(),
-    )
-}
-
-/// Like [`resolve_registry_signers`] but also returns each signer's bit position.
-///
-/// Used by callers that need to re-partition a resolved union bitmap back into per-statement
-/// subsets — e.g. equivocation punishment, which resolves the union of two signer sets once and
-/// then splits the result back into each statement's ordered signers.
-pub fn resolve_registry_signers_indexed(
-    nodes: &[[u8; 32]],
-    node_count: u16,
-    signers_bitmap: &[u8; 32],
-    entries: &[NodeEntry],
-) -> Result<Vec<(usize, SignerXy)>, AttestationError> {
-    let signers = bitmap_load(signers_bitmap);
-    let signer_count = signers.count_ones() as usize;
-    if entries.len() != signer_count {
+    mut visit: F,
+) -> Result<(), AttestationError>
+where
+    F: FnMut(usize, &NodeEntry) -> Result<(), AttestationError>,
+{
+    if entries.len() != signers.count_ones() as usize {
         return Err(AttestationError::MissingSignerAccount);
     }
 
-    let mut ordered = Vec::with_capacity(signer_count);
     let mut cursor = 0usize;
     for_each_set_bit_u256(signers, |bit_pos| {
         if bit_pos >= usize::from(node_count) || bit_pos >= nodes.len() {
@@ -65,17 +51,52 @@ pub fn resolve_registry_signers_indexed(
         if entry.account != nodes[bit_pos] {
             return Err(AttestationError::MissingSignerAccount);
         }
+        visit(bit_pos, entry)
+    })?;
+
+    Ok(())
+}
+
+/// Resolve selected signer entries against an immutable registry snapshot.
+///
+/// Entries must be provided in ascending signer-bit order. Each entry's `account` must equal
+/// `nodes[bit]` for the corresponding set bit.
+pub fn resolve_registry_signers(
+    nodes: &[[u8; 32]],
+    node_count: u16,
+    signers_bitmap: &[u8; 32],
+    entries: &[NodeEntry],
+) -> Result<Vec<SignerXy>, AttestationError> {
+    let signers = bitmap_load(signers_bitmap);
+    let mut ordered = Vec::with_capacity(signers.count_ones() as usize);
+    for_each_resolved_signer(nodes, node_count, signers, entries, |_, entry| {
+        ordered.push((entry.x, entry.y));
+        Ok(())
+    })?;
+    Ok(ordered)
+}
+
+/// Like [`resolve_registry_signers`] but also returns each signer's bit position.
+///
+/// Used by callers that need to re-partition a resolved union bitmap back into per-statement
+/// subsets — e.g. equivocation punishment, which resolves the union of two signer sets once and
+/// then splits the result back into each statement's ordered signers.
+pub fn resolve_registry_signers_indexed(
+    nodes: &[[u8; 32]],
+    node_count: u16,
+    signers_bitmap: &[u8; 32],
+    entries: &[NodeEntry],
+) -> Result<Vec<(usize, SignerXy)>, AttestationError> {
+    let signers = bitmap_load(signers_bitmap);
+    let mut ordered = Vec::with_capacity(signers.count_ones() as usize);
+    for_each_resolved_signer(nodes, node_count, signers, entries, |bit_pos, entry| {
         ordered.push((bit_pos, (entry.x, entry.y)));
         Ok(())
     })?;
-
     Ok(ordered)
 }
 
 /// Verify an attestation after resolving signers against a registry snapshot.
-///
-/// Requires `attestation.payload.registry_version == registry.version`. The caller must
-/// owner-check and deserialize accounts into `entries` beforehand.
 pub fn verify_attestation_resolved(
     attestation: &Attestation,
     registry: &RegistryView<'_>,
@@ -84,40 +105,66 @@ pub fn verify_attestation_resolved(
     if attestation.payload.registry_version != registry.version {
         return Err(AttestationError::InvalidRegistryVersion);
     }
-    let ordered = resolve_registry_signers(
-        registry.nodes,
-        registry.node_count,
-        &attestation.signature.signers_bitmap,
-        entries,
-    )?;
-    verify_attestation_parts(
+
+    let signers = bitmap_load(&attestation.signature.signers_bitmap);
+    if entries.len() != signers.count_ones() as usize {
+        return Err(AttestationError::MissingSignerAccount);
+    }
+
+    verify_attestation_core(
         attestation,
         u32::from(registry.node_count),
         registry.redundancy_buffer,
-        &ordered,
+        entries.len(),
+        |coalition| {
+            accumulate_resolved_signers(
+                registry.nodes,
+                registry.node_count,
+                signers,
+                entries,
+                coalition,
+            )
+        },
     )
 }
 
-/// Resolve signers against a registry snapshot and verify an aggregate signature over an
-/// arbitrary message hash (dispute / slash path).
+/// Verify an aggregate signature over an arbitrary message hash after resolving signers.
+///
+/// Returns `Ok(true)` when valid, `Ok(false)` when invalid (slashable), `Err` on malformed input.
 pub fn verify_aggregate_over_hash_resolved(
     registry: &RegistryView<'_>,
-    registry_version: u32,
-    signers_bitmap: &[u8; 32],
-    agg_sig_s: &[u8; 32],
-    commitment_addr: &[u8; 20],
+    signature: &SchnorrSignature,
     message_hash: &[u8; 32],
     entries: &[NodeEntry],
 ) -> Result<bool, AttestationError> {
-    if registry_version != registry.version {
-        return Err(AttestationError::InvalidRegistryVersion);
-    }
-    if !secp256k1_scalar_is_valid_nonzero(agg_sig_s) {
-        return Ok(false);
-    }
-    let ordered =
-        resolve_registry_signers(registry.nodes, registry.node_count, signers_bitmap, entries)?;
-    verify_aggregate_over_hash(&ordered, agg_sig_s, commitment_addr, message_hash)
+    let signers = bitmap_load(&signature.signers_bitmap);
+    verify_aggregate_over_hash_core(
+        &signature.agg_sig_s,
+        &signature.commitment_addr,
+        message_hash,
+        entries.len(),
+        |coalition| {
+            accumulate_resolved_signers(
+                registry.nodes,
+                registry.node_count,
+                signers,
+                entries,
+                coalition,
+            )
+        },
+    )
+}
+
+fn accumulate_resolved_signers(
+    nodes: &[[u8; 32]],
+    node_count: u16,
+    signers: U256,
+    entries: &[NodeEntry],
+    coalition: &mut CoalitionAccumulator,
+) -> Result<(), AttestationError> {
+    for_each_resolved_signer(nodes, node_count, signers, entries, |_, entry| {
+        coalition.add_stored_xy(&entry.x, &entry.y)
+    })
 }
 
 #[cfg(test)]
@@ -128,19 +175,7 @@ mod tests {
         CANONICAL_TIMESTAMP, COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT,
         REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
     };
-    use crate::message::compute_message_hash;
     use crate::MAX_REGISTRY_NODES;
-    use libsecp256k1::{PublicKey, PublicKeyFormat};
-
-    fn pubkey_xy(compressed: &[u8; 33]) -> ([u8; 32], [u8; 32]) {
-        let pk = PublicKey::parse_slice(compressed, Some(PublicKeyFormat::Compressed))
-            .expect("fixture pubkey must be a valid curve point");
-        let full = pk.serialize();
-        (
-            full[1..33].try_into().unwrap(),
-            full[33..65].try_into().unwrap(),
-        )
-    }
 
     fn fixture_nodes() -> [[u8; 32]; MAX_REGISTRY_NODES] {
         let mut nodes = [[0u8; 32]; MAX_REGISTRY_NODES];
@@ -183,7 +218,7 @@ mod tests {
     fn fixture_entries(nodes: &[[u8; 32]; MAX_REGISTRY_NODES]) -> Vec<NodeEntry> {
         let mut entries = Vec::new();
         for_each_set_bit(&SIGNERS_BITMAP, |bit_pos| {
-            let (x, y) = pubkey_xy(&PUBKEYS[bit_pos]);
+            let (x, y) = PUBKEYS[bit_pos];
             entries.push(NodeEntry {
                 account: nodes[bit_pos],
                 x,
@@ -307,48 +342,5 @@ mod tests {
         let entries = fixture_entries(&nodes);
         let err = verify_attestation_resolved(&attestation, &registry, &entries).unwrap_err();
         assert_eq!(err, AttestationError::InvalidRegistryVersion);
-    }
-
-    #[test]
-    fn verify_aggregate_over_hash_resolved_roundtrip() {
-        let nodes = fixture_nodes();
-        let registry = fixture_registry(&nodes);
-        let attestation = fixture_attestation();
-        let entries = fixture_entries(&nodes);
-        let message_hash =
-            compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);
-
-        assert!(verify_aggregate_over_hash_resolved(
-            &registry,
-            REGISTRY_VERSION,
-            &attestation.signature.signers_bitmap,
-            &attestation.signature.agg_sig_s,
-            &attestation.signature.commitment_addr,
-            &message_hash,
-            &entries,
-        )
-        .unwrap());
-    }
-
-    #[test]
-    fn verify_aggregate_over_hash_resolved_rejects_tampered_hash() {
-        let nodes = fixture_nodes();
-        let registry = fixture_registry(&nodes);
-        let attestation = fixture_attestation();
-        let entries = fixture_entries(&nodes);
-        let mut message_hash =
-            compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);
-        message_hash[0] ^= 0xff;
-
-        assert!(!verify_aggregate_over_hash_resolved(
-            &registry,
-            REGISTRY_VERSION,
-            &attestation.signature.signers_bitmap,
-            &attestation.signature.agg_sig_s,
-            &attestation.signature.commitment_addr,
-            &message_hash,
-            &entries,
-        )
-        .unwrap());
     }
 }

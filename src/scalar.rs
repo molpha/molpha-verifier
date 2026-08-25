@@ -44,16 +44,13 @@ const SECP256K1_ORDER_BARRETT_MU_LIMBS_LE: [u64; 5] = [
     0x0000000000000001,
 ];
 
+// The 256-bit compare / subtract / reduce helpers all work in 64-bit limbs rather than byte at a
+// time: four iterations instead of thirty-two, on a VM whose registers are 64-bit anyway. The
+// big-endian `[u8; 32]` signatures are kept because that is how scalars are stored and hashed.
+
+#[inline]
 fn cmp_be(a: &[u8; 32], b: &[u8; 32]) -> core::cmp::Ordering {
-    for i in 0..32 {
-        if a[i] < b[i] {
-            return core::cmp::Ordering::Less;
-        }
-        if a[i] > b[i] {
-            return core::cmp::Ordering::Greater;
-        }
-    }
-    core::cmp::Ordering::Equal
+    cmp_limbs_le_4(&be32_to_limbs_le(a), &be32_to_limbs_le(b))
 }
 
 pub fn secp256k1_scalar_is_valid_nonzero(x: &[u8; 32]) -> bool {
@@ -85,28 +82,19 @@ pub fn secp256k1_ecdsa_normalize_low_s(
     Ok(recovery_id)
 }
 
+/// `a - b (mod 2^256)` — wraps on underflow, as the byte-wise version did.
+#[inline]
 fn sub_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut borrow = 0i16;
-    for i in (0..32).rev() {
-        let diff = a[i] as i16 - b[i] as i16 - borrow;
-        if diff < 0 {
-            out[i] = (diff + 256) as u8;
-            borrow = 1;
-        } else {
-            out[i] = diff as u8;
-            borrow = 0;
-        }
-    }
-    out
+    limbs_le_to_be32(&sub_limbs_le_4(be32_to_limbs_le(a), &be32_to_limbs_le(b)))
 }
 
+/// Reduce modulo `n` with a single conditional subtraction.
+///
+/// Sufficient for any 32-byte input: `n > 2^255`, so `2n > 2^256 > x` and one subtraction always
+/// lands below `n`.
 #[inline]
-fn mod_reduce_once(mut x: [u8; 32]) -> [u8; 32] {
-    if cmp_be(&x, &SECP256K1_ORDER) != core::cmp::Ordering::Less {
-        x = sub_be(&x, &SECP256K1_ORDER);
-    }
-    x
+fn mod_reduce_once(x: [u8; 32]) -> [u8; 32] {
+    limbs_le_to_be32(&reduce_mod_n_le(be32_to_limbs_le(&x)))
 }
 
 /// Reduce a 32-byte big-endian integer modulo secp256k1 curve order \(n\).
@@ -347,8 +335,10 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
 }
 
 pub fn mul_mod_n_barrett(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let a_le = reduce_mod_n_le(be32_to_limbs_le(&mod_reduce_once(*a)));
-    let b_le = reduce_mod_n_le(be32_to_limbs_le(&mod_reduce_once(*b)));
+    // `reduce_mod_n_le` *is* `mod_reduce_once` in limb space, so reducing once here replaces the
+    // previous reduce-in-bytes-then-reduce-again-in-limbs round trip.
+    let a_le = reduce_mod_n_le(be32_to_limbs_le(a));
+    let b_le = reduce_mod_n_le(be32_to_limbs_le(b));
     let prod = mul_4x4(&a_le, &b_le);
     let r_le = barrett_reduce_mod_n(&prod);
     limbs_le_to_be32(&r_le)

@@ -123,25 +123,47 @@ where
     }
 }
 
-fn u256_be_from_u64(counter: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[24..32].copy_from_slice(&counter.to_be_bytes());
-    out
-}
-
 /// `keccak256(seed || SELECTION_DOMAIN || counter_be)` — uses `sol_keccak256` on BPF.
+///
+/// The counter is a big-endian `U256` word, i.e. 24 zero bytes then the `u64`.
 fn selection_hash_round(seed: &[u8; 32], counter: u64) -> [u8; 32] {
-    let counter_word = u256_be_from_u64(counter);
+    let mut counter_word = [0u8; 32];
+    counter_word[24..32].copy_from_slice(&counter.to_be_bytes());
     hashv(&[seed.as_ref(), &SELECTION_DOMAIN, &counter_word]).to_bytes()
 }
 
+/// Limb index and mask for bit `pos`.
+#[inline(always)]
+fn limb_of(pos: usize) -> (usize, u64) {
+    (pos >> 6, 1u64 << (pos & 63))
+}
+
+/// Low `node_count` bits set. `node_count` must be in `1..=256`.
 #[inline]
-fn full_mask_u256(node_count: u32) -> U256 {
-    if node_count == 256 {
-        U256::MAX
-    } else {
-        (U256::from(1u8) << node_count) - U256::from(1u8)
+fn full_mask_limbs(node_count: u32) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    let bits = node_count as usize;
+    for (i, limb) in out.iter_mut().enumerate() {
+        let low = i * 64;
+        *limb = if bits >= low + 64 {
+            u64::MAX
+        } else if bits > low {
+            (1u64 << (bits - low)) - 1
+        } else {
+            0
+        };
     }
+    out
+}
+
+#[inline]
+fn limbs_to_u256(limbs: &[u64; 4]) -> U256 {
+    let mut out = [0u8; 32];
+    for (i, limb) in limbs.iter().enumerate() {
+        let start = 24 - i * 8;
+        out[start..start + 8].copy_from_slice(&limb.to_be_bytes());
+    }
+    U256::from_be_bytes(out)
 }
 
 /// Without-replacement sampling.
@@ -149,9 +171,9 @@ fn sample_without_replacement(
     seed: &[u8; 32],
     node_count: u32,
     group_size: u32,
-) -> Result<U256, AttestationError> {
+) -> Result<[u64; 4], AttestationError> {
     let limit = (u64::from(u32::MAX) / u64::from(node_count)) * u64::from(node_count);
-    let mut bitmap = U256::ZERO;
+    let mut bitmap = [0u64; 4];
     let mut selected = 0u32;
     let mut counter = 0u64;
 
@@ -163,20 +185,19 @@ fn sample_without_replacement(
         let digest = selection_hash_round(seed, counter);
         counter += 1;
 
-        let mut word = bitmap_load(&digest);
-        for _ in 0..8 {
+        // Each round yields eight candidate draws: the digest read as eight big-endian `u32`s,
+        // most significant first.
+        for chunk in digest.chunks_exact(4) {
             if selected >= group_size {
                 break;
             }
 
-            let limb = u32::try_from(word >> 224).unwrap_or(u32::MAX);
-            word <<= 32;
+            let draw = u32::from_be_bytes(chunk.try_into().expect("chunks_exact(4)"));
 
-            if u64::from(limb) < limit {
-                let pos = (limb % node_count) as usize;
-                let bit = U256::from(1u8) << pos;
-                if (bitmap & bit) == U256::ZERO {
-                    bitmap |= bit;
+            if u64::from(draw) < limit {
+                let (limb, mask) = limb_of((draw % node_count) as usize);
+                if bitmap[limb] & mask == 0 {
+                    bitmap[limb] |= mask;
                     selected += 1;
                 }
             }
@@ -192,30 +213,44 @@ pub fn derive_group_bitmap(
     node_count: u32,
     group_size: u32,
 ) -> Result<[u8; 32], AttestationError> {
-    if node_count == 0 {
-        return Err(AttestationError::GroupBitmapDerivationFailed);
-    }
-    if node_count > 256 {
-        return Err(AttestationError::GroupBitmapDerivationFailed);
-    }
-    if group_size > node_count {
+    Ok(bitmap_store(derive_group_bitmap_u256(
+        seed, node_count, group_size,
+    )?))
+}
+
+/// [`derive_group_bitmap`] without the `[u8; 32]` round-trip, for callers that go straight on to
+/// `U256` bit operations.
+pub fn derive_group_bitmap_u256(
+    seed: &[u8; 32],
+    node_count: u32,
+    group_size: u32,
+) -> Result<U256, AttestationError> {
+    if node_count == 0 || node_count > 256 || group_size > node_count {
         return Err(AttestationError::GroupBitmapDerivationFailed);
     }
     if group_size == 0 {
-        return Ok([0u8; 32]);
-    }
-    if group_size == node_count {
-        return Ok(bitmap_store(full_mask_u256(node_count)));
+        return Ok(U256::ZERO);
     }
 
+    let full = full_mask_limbs(node_count);
+    if group_size == node_count {
+        return Ok(limbs_to_u256(&full));
+    }
+
+    // Sampling cost scales with the number of draws, so for a group covering more than half the
+    // registry, sample the complement and invert.
     let bitmap = if group_size > node_count / 2 {
         let excluded = sample_without_replacement(seed, node_count, node_count - group_size)?;
-        full_mask_u256(node_count) ^ excluded
+        let mut out = [0u64; 4];
+        for (i, limb) in out.iter_mut().enumerate() {
+            *limb = full[i] ^ excluded[i];
+        }
+        out
     } else {
         sample_without_replacement(seed, node_count, group_size)?
     };
 
-    Ok(bitmap_store(bitmap))
+    Ok(limbs_to_u256(&bitmap))
 }
 
 pub fn bitmap_is_subset(sub: &[u8; 32], sup: &[u8; 32]) -> bool {

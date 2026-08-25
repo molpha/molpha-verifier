@@ -12,14 +12,12 @@ use molpha_verifier::fixtures::{
     REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
 };
 use molpha_verifier::solana::{
-    verify_attestation_accounts, AccountError, NodeAccount, NodeStatus, RegistryAccount,
-    DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN, NODE_DISCRIMINATOR, NODE_SEED_PREFIX,
-    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
+    verify_attestation_accounts, AccountError, RegistryAccount, DISCRIMINATOR_LEN,
+    NODE_ACCOUNT_LEN, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, REGISTRY_ACCOUNT_LEN,
+    REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
 };
 use molpha_verifier::{Attestation, AttestationPayload, SchnorrSignature};
 
-use borsh::BorshSerialize;
-use libsecp256k1::{PublicKey, PublicKeyFormat};
 use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
 const PROGRAM_ID: Pubkey = Pubkey::new_from_array([7u8; 32]);
@@ -57,29 +55,36 @@ fn registry_pda(version: u32) -> (Pubkey, u8) {
     )
 }
 
+const NODE_STATUS_OFFSET: usize = DISCRIMINATOR_LEN + 32 + 32 + 32;
+const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 7 * 8;
+
+fn fill_node_account(
+    data: &mut [u8],
+    owner: &[u8; 32],
+    x: &[u8; 32],
+    y: &[u8; 32],
+    status: u8,
+    bump: u8,
+) {
+    data[..DISCRIMINATOR_LEN].copy_from_slice(&NODE_DISCRIMINATOR);
+    data[DISCRIMINATOR_LEN..DISCRIMINATOR_LEN + 32].copy_from_slice(owner);
+    data[DISCRIMINATOR_LEN + 32..DISCRIMINATOR_LEN + 64].copy_from_slice(x);
+    data[DISCRIMINATOR_LEN + 64..DISCRIMINATOR_LEN + 96].copy_from_slice(y);
+    data[NODE_STATUS_OFFSET] = status;
+    data[NODE_BUMP_OFFSET] = bump;
+}
+
 fn node_account_data(index: usize) -> Vec<u8> {
-    let pk = PublicKey::parse_slice(&PUBKEYS[index], Some(PublicKeyFormat::Compressed))
-        .expect("fixture pubkey");
-    let full = pk.serialize();
-    let node = NodeAccount {
-        owner: node_owner(index),
-        secp256k1_pubkey_x: full[1..33].try_into().unwrap(),
-        secp256k1_pubkey_y: full[33..65].try_into().unwrap(),
-        status: NodeStatus::Active,
-        ip: [127, 0, 0, 1],
-        port: 8080,
-        locked_amount: 100,
-        claimable_rewards: 0,
-        registered_at: 1,
-        deactivated_at: 0,
-        withdrawable_at: 0,
-        frozen_until: 0,
-        punished_at: 0,
-        bump: node_pda(index).1,
-    };
-    let mut data = NODE_DISCRIMINATOR.to_vec();
-    node.serialize(&mut data).expect("serialize node");
-    assert_eq!(data.len(), NODE_ACCOUNT_LEN);
+    let (x, y) = PUBKEYS[index];
+    let mut data = vec![0u8; NODE_ACCOUNT_LEN];
+    fill_node_account(
+        &mut data,
+        &node_owner(index),
+        &x,
+        &y,
+        0,
+        node_pda(index).1,
+    );
     data
 }
 

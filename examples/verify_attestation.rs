@@ -7,8 +7,8 @@
 
 use borsh::BorshDeserialize;
 use molpha_verifier::{
-    bitmap::for_each_set_bit, compute_message_hash, fixtures, verify_attestation_compressed,
-    Attestation, AttestationError, AttestationPayload, SchnorrSignature,
+    bitmap::for_each_set_bit, compute_message_hash, fixtures, verify_attestation, Attestation,
+    AttestationError, AttestationPayload, SchnorrSignature,
 };
 
 fn main() -> Result<(), AttestationError> {
@@ -56,17 +56,17 @@ fn main() -> Result<(), AttestationError> {
     //
     // `node_count` is the registry size for `payload.registry_version`. Seven signers at bitmap
     // positions 3, 5, 7, 8, 9, 10, 11 (signersBitmap = 4008); threshold 5; redundancy_buffer 2.
-    // `ordered_signers` are the signing nodes' compressed pubkeys in ascending bitmap-bit order.
-    let mut signer_pubkeys = Vec::new();
+    // `ordered_signers` are the signing nodes' (x, y) pubkeys in ascending bitmap-bit order.
+    let mut ordered_signers = Vec::new();
     for_each_set_bit(&fixtures::SIGNERS_BITMAP, |i| {
-        signer_pubkeys.push(fixtures::PUBKEYS[i]);
+        ordered_signers.push(fixtures::PUBKEYS[i]);
     });
 
-    verify_attestation_compressed(
+    verify_attestation(
         &attestation,
         fixtures::REGISTERED_NODE_COUNT,
         fixtures::REDUNDANCY_BUFFER,
-        &signer_pubkeys,
+        &ordered_signers,
     )?;
 
     println!("aggregate Schnorr signature: OK");

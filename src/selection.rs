@@ -1,8 +1,9 @@
 //! Deterministic selection-bitmap derivation for a `(source_id, registry_version, timestamp)` round.
 
+use ethnum::U256;
 use solana_keccak_hasher::hashv;
 
-use crate::bitmap::{derive_group_bitmap, effective_selection_size};
+use crate::bitmap::{bitmap_store, derive_group_bitmap_u256, effective_selection_size};
 use crate::error::AttestationError;
 
 /// `bytes32(keccak256("MOLPHA_SELECTION_V1"))` — Selection seed prefix.
@@ -25,17 +26,38 @@ pub fn derive_selection_bitmap(
     signatures_required: u8,
     redundancy_buffer: u8,
 ) -> Result<[u8; 32], AttestationError> {
+    Ok(bitmap_store(derive_selection_bitmap_u256(
+        source_id,
+        registry_version,
+        canonical_timestamp,
+        node_count,
+        signatures_required,
+        redundancy_buffer,
+    )?))
+}
+
+/// [`derive_selection_bitmap`] without the `[u8; 32]` round-trip — what verification uses, since
+/// it goes straight on to a `U256` subset test.
+pub fn derive_selection_bitmap_u256(
+    source_id: &[u8; 32],
+    registry_version: u32,
+    canonical_timestamp: u64,
+    node_count: u32,
+    signatures_required: u8,
+    redundancy_buffer: u8,
+) -> Result<U256, AttestationError> {
+    let registry_version_bytes = registry_version.to_be_bytes();
     let canonical_timestamp_bytes = canonical_timestamp.to_be_bytes();
     let selection_seed = hashv(&[
         SELECTION_SEED_PREFIX.as_slice(),
         source_id.as_ref(),
-        registry_version.to_be_bytes().as_ref(),
+        registry_version_bytes.as_ref(),
         canonical_timestamp_bytes.as_ref(),
     ])
     .to_bytes();
     let selection_size =
         effective_selection_size(signatures_required, redundancy_buffer, node_count);
-    derive_group_bitmap(&selection_seed, node_count, selection_size)
+    derive_group_bitmap_u256(&selection_seed, node_count, selection_size)
 }
 
 #[cfg(test)]

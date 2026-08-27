@@ -52,7 +52,8 @@ pub fn bitmap_clear_bit(bitmap: &mut [u8; 32], pos: usize) {
     *bitmap = bitmap_store(v);
 }
 
-pub fn bitmap_popcount_evm(bitmap: &[u8; 32]) -> u32 {
+#[inline]
+pub fn bitmap_popcount(bitmap: &[u8; 32]) -> u32 {
     bitmap_load(bitmap).count_ones()
 }
 
@@ -323,7 +324,7 @@ mod tests {
         assert!(bitmap_bit_set(&bm, 7));
         assert!(bitmap_bit_set(&bm, 255));
         assert!(!bitmap_bit_set(&bm, 1));
-        assert_eq!(bitmap_popcount_evm(&bm), 3);
+        assert_eq!(bitmap_popcount(&bm), 3);
     }
 
     #[test]

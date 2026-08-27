@@ -57,6 +57,15 @@ pub fn secp256k1_scalar_is_valid_nonzero(x: &[u8; 32]) -> bool {
     !is_zero(x) && cmp_be(x, &SECP256K1_ORDER) == core::cmp::Ordering::Less
 }
 
+/// Return `-value mod n` for a canonical secp256k1 scalar.
+pub(crate) fn negate_mod_n(value: &[u8; 32]) -> [u8; 32] {
+    if is_zero(value) {
+        [0u8; 32]
+    } else {
+        sub_be(&SECP256K1_ORDER, value)
+    }
+}
+
 /// Normalize an ECDSA signature to "low-s" form.
 ///
 /// Some secp256k1 recovery implementations reject high-s signatures.

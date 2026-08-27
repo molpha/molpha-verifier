@@ -25,7 +25,7 @@ pub struct AttestationPayload {
 )]
 pub struct SchnorrSignature {
     pub agg_sig_s: [u8; 32],
-    pub commitment_addr: [u8; 20],
+    pub commitment: [u8; 20],
     pub signers_bitmap: [u8; 32],
 }
 
@@ -44,7 +44,7 @@ pub struct Attestation {
 mod tests {
     use super::*;
     use crate::fixtures::{PAYLOAD_BORSH, SIGNATURE_BORSH, VALUE};
-    use borsh::{BorshDeserialize, BorshSerialize};
+    use borsh::BorshDeserialize;
 
     #[test]
     fn fixture_payload_borsh_roundtrip() {
@@ -54,7 +54,7 @@ mod tests {
         assert_eq!(decoded.signatures_required, 5);
         assert_eq!(decoded.canonical_timestamp, 1_705_257_421);
 
-        let encoded = decoded.try_to_vec().expect("encode payload");
+        let encoded = borsh::to_vec(&decoded).expect("encode payload");
         assert_eq!(encoded.as_slice(), PAYLOAD_BORSH.as_slice());
     }
 
@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(decoded.signers_bitmap[30], 0x0f);
         assert_eq!(decoded.signers_bitmap[31], 0xa8);
 
-        let encoded = decoded.try_to_vec().expect("encode signature");
+        let encoded = borsh::to_vec(&decoded).expect("encode signature");
         assert_eq!(encoded.as_slice(), SIGNATURE_BORSH.as_slice());
     }
 
@@ -75,7 +75,7 @@ mod tests {
             SchnorrSignature::try_from_slice(&SIGNATURE_BORSH).expect("decode signature");
         let attestation = Attestation { payload, signature };
 
-        let encoded = attestation.try_to_vec().expect("encode attestation");
+        let encoded = borsh::to_vec(&attestation).expect("encode attestation");
         let decoded = Attestation::try_from_slice(&encoded).expect("decode attestation");
         assert_eq!(decoded, attestation);
     }

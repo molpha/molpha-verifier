@@ -32,6 +32,7 @@ pub mod error;
 pub mod message;
 pub mod onchain;
 pub mod payload;
+pub mod pop;
 pub mod scalar;
 pub mod selection;
 #[cfg(feature = "solana")]
@@ -45,6 +46,7 @@ pub use onchain::*;
 pub use payload::Attestation;
 pub use payload::AttestationPayload;
 pub use payload::SchnorrSignature;
+pub use pop::{validate_key_and_verify_pop, NodePopError, NODE_POP_PREFIX};
 pub use state::*;
 
 // High-level verification API.

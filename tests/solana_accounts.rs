@@ -18,7 +18,9 @@ use molpha_verifier::solana::{
 };
 use molpha_verifier::{Attestation, AttestationPayload, SchnorrSignature};
 
-use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+use solana_account_info::AccountInfo;
+use solana_program_error::ProgramError;
+use solana_pubkey::Pubkey;
 
 const PROGRAM_ID: Pubkey = Pubkey::new_from_array([7u8; 32]);
 
@@ -45,14 +47,19 @@ fn node_owner(index: usize) -> [u8; 32] {
 }
 
 fn node_pda(index: usize) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[NODE_SEED_PREFIX, node_owner(index).as_ref()], &PROGRAM_ID)
+    Pubkey::derive_program_address(
+        &[NODE_SEED_PREFIX, node_owner(index).as_ref()],
+        &PROGRAM_ID,
+    )
+    .expect("node PDA")
 }
 
 fn registry_pda(version: u32) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
+    Pubkey::derive_program_address(
         &[REGISTRY_SEED_PREFIX, version.to_le_bytes().as_ref()],
         &PROGRAM_ID,
     )
+    .expect("registry PDA")
 }
 
 const NODE_STATUS_OFFSET: usize = DISCRIMINATOR_LEN + 32 + 32 + 32;
@@ -113,7 +120,7 @@ fn attestation() -> Attestation {
         },
         signature: SchnorrSignature {
             agg_sig_s: S,
-            commitment_addr: COMMITMENT,
+            commitment: COMMITMENT,
             signers_bitmap: SIGNERS_BITMAP,
         },
     }

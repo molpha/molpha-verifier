@@ -7,7 +7,7 @@ use libsecp256k1::PublicKey;
 use molpha_verifier::{
     bitmap::{
         bitmap_bit_set, bitmap_clear_bit, bitmap_is_subset, bitmap_is_subset_u256, bitmap_load,
-        bitmap_popcount_evm, bitmap_set_bit, bitmap_store, derive_group_bitmap,
+        bitmap_popcount, bitmap_set_bit, bitmap_store, derive_group_bitmap,
         effective_selection_size, for_each_set_bit, validate_bitmap_upper_bits_clear,
     },
     coalition::{CoalitionAccumulator, public_key_from_affine_xy},
@@ -114,9 +114,9 @@ fn arb_attestation_payload() -> impl Strategy<Value = AttestationPayload> {
 
 fn arb_schnorr_signature() -> impl Strategy<Value = SchnorrSignature> {
     (any::<[u8; 32]>(), any::<[u8; 20]>(), any::<[u8; 32]>()).prop_map(
-        |(agg_sig_s, commitment_addr, signers_bitmap)| SchnorrSignature {
+        |(agg_sig_s, commitment, signers_bitmap)| SchnorrSignature {
             agg_sig_s,
-            commitment_addr,
+            commitment,
             signers_bitmap,
         },
     )
@@ -142,7 +142,7 @@ proptest! {
 
     #[test]
     fn bitmap_popcount_matches_manual_iteration(bytes in any::<[u8; 32]>()) {
-        prop_assert_eq!(bitmap_popcount_evm(&bytes), popcount_manual(&bytes));
+        prop_assert_eq!(bitmap_popcount(&bytes), popcount_manual(&bytes));
     }
 
     #[test]
@@ -215,7 +215,7 @@ proptest! {
     ) {
         prop_assume!(group_size <= node_count);
         let bitmap = derive_group_bitmap(&seed, node_count, group_size).unwrap();
-        prop_assert_eq!(bitmap_popcount_evm(&bitmap), group_size);
+        prop_assert_eq!(bitmap_popcount(&bitmap), group_size);
         prop_assert!(bits_in_range(&bitmap, node_count));
     }
 
@@ -226,7 +226,7 @@ proptest! {
             for group_size in [0, 1, node_count / 2, node_count - 1, node_count] {
                 let bitmap = derive_group_bitmap(&seed, node_count, group_size).unwrap();
                 prop_assert_eq!(
-                    bitmap_popcount_evm(&bitmap),
+                    bitmap_popcount(&bitmap),
                     group_size,
                     "n={} g={}", node_count, group_size,
                 );

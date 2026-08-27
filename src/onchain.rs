@@ -140,7 +140,7 @@ pub fn verify_aggregate_over_hash_resolved(
     let signers = bitmap_load(&signature.signers_bitmap);
     verify_aggregate_over_hash_core(
         &signature.agg_sig_s,
-        &signature.commitment_addr,
+        &signature.commitment,
         message_hash,
         entries.len(),
         |coalition| {
@@ -209,7 +209,7 @@ mod tests {
             },
             signature: crate::payload::SchnorrSignature {
                 agg_sig_s: S,
-                commitment_addr: COMMITMENT,
+                commitment: COMMITMENT,
                 signers_bitmap: SIGNERS_BITMAP,
             },
         }

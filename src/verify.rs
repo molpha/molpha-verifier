@@ -104,7 +104,7 @@ where
         &x_coalition,
         &message_hash,
         &signature.agg_sig_s,
-        &signature.commitment_addr,
+        &signature.commitment,
     ) {
         Ok(())
     } else {
@@ -145,12 +145,12 @@ pub fn reconstruct_coalition_key(
 pub fn verify_aggregate_over_hash(
     ordered_signers: &[SignerXy],
     agg_sig_s: &[u8; 32],
-    commitment_addr: &[u8; 20],
+    commitment: &[u8; 20],
     message_hash: &[u8; 32],
 ) -> Result<bool, AttestationError> {
     verify_aggregate_over_hash_core(
         agg_sig_s,
-        commitment_addr,
+        commitment,
         message_hash,
         ordered_signers.len(),
         |coalition| accumulate_xy(ordered_signers, coalition),
@@ -161,7 +161,7 @@ pub fn verify_aggregate_over_hash(
 /// without materializing them.
 pub(crate) fn verify_aggregate_over_hash_core<F>(
     agg_sig_s: &[u8; 32],
-    commitment_addr: &[u8; 20],
+    commitment: &[u8; 20],
     message_hash: &[u8; 32],
     supplied_signers: usize,
     accumulate: F,
@@ -182,19 +182,19 @@ where
         &x_coalition,
         message_hash,
         agg_sig_s,
-        commitment_addr,
+        commitment,
     ))
 }
 
-/// Run the Schnorr→ECDSA recovery trick and compare the recovered address to `commitment_addr`.
+/// Run the Schnorr→ECDSA recovery trick and compare the recovered address to `commitment`.
 fn recover_and_match(
     x_coalition: &[u8; 33],
     message_hash: &[u8; 32],
     agg_sig_s: &[u8; 32],
-    commitment_addr: &[u8; 20],
+    commitment: &[u8; 20],
 ) -> bool {
     let (recovery_id, ecdsa_signature, ecdsa_hash) =
-        match evm_schnorr_ecdsa_inputs(x_coalition, message_hash, agg_sig_s, commitment_addr) {
+        match evm_schnorr_ecdsa_inputs(x_coalition, message_hash, agg_sig_s, commitment) {
             Ok(v) => v,
             Err(_) => return false,
         };
@@ -202,7 +202,7 @@ fn recover_and_match(
         Ok(r) => r,
         Err(_) => return false,
     };
-    eth_address_from_uncompressed_pubkey(recovered.to_bytes()) == *commitment_addr
+    eth_address_from_uncompressed_pubkey(recovered.to_bytes()) == *commitment
 }
 
 #[cfg(test)]
@@ -236,8 +236,8 @@ mod tests {
 
     #[test]
     fn fixture_signers_bitmap_popcount_meets_threshold() {
-        use crate::bitmap::bitmap_popcount_evm;
-        let popcount = bitmap_popcount_evm(&SIGNERS_BITMAP);
+        use crate::bitmap::bitmap_popcount;
+        let popcount = bitmap_popcount(&SIGNERS_BITMAP);
         assert_eq!(popcount, SIGNER_COUNT);
         assert!(popcount >= u32::from(SIGNATURES_REQUIRED));
     }
@@ -267,7 +267,7 @@ mod tests {
             },
             signature: crate::payload::SchnorrSignature {
                 agg_sig_s: S,
-                commitment_addr: COMMITMENT,
+                commitment: COMMITMENT,
                 signers_bitmap: SIGNERS_BITMAP,
             },
         }
@@ -324,7 +324,7 @@ mod tests {
         assert!(verify_aggregate_over_hash(
             &signers,
             &attestation.signature.agg_sig_s,
-            &attestation.signature.commitment_addr,
+            &attestation.signature.commitment,
             &message_hash,
         )
         .unwrap());
@@ -335,7 +335,7 @@ mod tests {
         assert!(!verify_aggregate_over_hash(
             &signers,
             &attestation.signature.agg_sig_s,
-            &attestation.signature.commitment_addr,
+            &attestation.signature.commitment,
             &bad_hash,
         )
         .unwrap());

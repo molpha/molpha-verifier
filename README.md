@@ -17,7 +17,7 @@ Given an [`AttestationPayload`](src/payload.rs) (or combined [`Attestation`](src
 4. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
 5. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys
 6. Hashes the message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
-7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment_addr`
+7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
 
 Checks run cheapest-first, so a malformed attestation is rejected before it costs a selection derivation or a curve operation.
 
@@ -46,7 +46,7 @@ Aggregate signature material, passed separately from the payload:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `agg_sig_s` | `[u8; 32]` | Aggregate Schnorr scalar `s` |
-| `commitment_addr` | `[u8; 20]` | Ethereum address of nonce point `R` |
+| `commitment` | `[u8; 20]` | Ethereum address of nonce point `R` |
 | `signers_bitmap` | `[u8; 32]` | bitmap (big-endian) |
 
 ### `RegistryView`
@@ -118,6 +118,27 @@ Requires `attestation.payload.registry_version == registry.version`. The caller 
 
 Signer resolution alone: `resolve_registry_signers` / `resolve_registry_signers_indexed` (the indexed form also returns bit positions, useful when splitting a union bitmap).
 
+### Node key registration
+
+Registration callers can validate a compressed secp256k1 key and its Schnorr proof of possession
+in one pass. A successful result is the canonical affine `(x, y)` pair to store in the node
+account:
+
+```rust
+use molpha_verifier::validate_key_and_verify_pop;
+
+let (pubkey_x, pubkey_y) = validate_key_and_verify_pop(
+    &program_id,
+    &node_id,
+    &compressed_pubkey,
+    &pop_sig_r,
+    &pop_sig_s,
+)?;
+```
+
+`NodePopError::InvalidPublicKey` distinguishes malformed/non-recovery-compatible keys from
+`NodePopError::InvalidProof`, allowing programs to preserve their existing instruction errors.
+
 ### Account path (`solana` feature)
 
 With the `solana` feature the crate reads the accounts itself — hand it the `Registry` account and the signers' `Node` accounts and it does the rest:
@@ -168,7 +189,7 @@ use molpha_verifier::verify_aggregate_over_hash;
 let valid = verify_aggregate_over_hash(
     &ordered_signers,
     &signature.agg_sig_s,
-    &signature.commitment_addr,
+    &signature.commitment,
     &message_hash,
 )?;
 ```
@@ -178,6 +199,7 @@ let valid = verify_aggregate_over_hash(
 | Module | Role |
 | --- | --- |
 | `payload` | Plain `AttestationPayload`, `SchnorrSignature`, and `Attestation` structs |
+| `pop` | Canonical secp256k1 node-key validation and proof-of-possession verification |
 | `verify` | High-level verify, coalition reconstruction, dispute helpers |
 | `onchain` | Snapshot signer resolution (`resolve_registry_signers*`) over `RegistryView` / `NodeEntry` |
 | `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
@@ -195,8 +217,8 @@ let valid = verify_aggregate_over_hash(
 | --- | --- |
 | *(default)* | Pure verification; no Borsh |
 | `borsh` | Derive Borsh on `AttestationPayload`, `SchnorrSignature`, and `Attestation` |
-| `thiserror` | `Display` and `std::error::Error` on [`AttestationError`](src/error.rs) for off-chain tooling |
-| `solana` | The [`solana` module](src/solana.rs): verify straight from `&AccountInfo`. Adds `solana-program`, implies `borsh` |
+| `thiserror` | `Display` and `std::error::Error` on [`AttestationError`](src/error.rs) and `NodePopError` for off-chain tooling |
+| `solana` | The [`solana` module](src/solana.rs): verify straight from `&AccountInfo`. Adds modular `solana-account-info`, `solana-program-error`, and `solana-pubkey`; implies `borsh` |
 
 ## Development
 

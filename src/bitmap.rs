@@ -177,12 +177,12 @@ fn sample_without_replacement(
         counter += 1;
 
         // Eight big-endian u32 draws per digest, MSB first.
-        for chunk in digest.chunks_exact(4) {
+        for &chunk in digest.as_chunks::<4>().0 {
             if selected >= group_size {
                 break;
             }
 
-            let draw = u32::from_be_bytes(chunk.try_into().expect("chunks_exact(4)"));
+            let draw = u32::from_be_bytes(chunk);
 
             if u64::from(draw) < limit {
                 let (limb, mask) = limb_of((draw % node_count) as usize);

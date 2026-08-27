@@ -6,15 +6,13 @@ use solana_keccak_hasher::hashv;
 use crate::bitmap::{bitmap_store, derive_group_bitmap_u256, effective_selection_size};
 use crate::error::AttestationError;
 
-/// `bytes32(keccak256("MOLPHA_SELECTION_V1"))` — Selection seed prefix.
-///
-/// Value: `keccak256(bytes("MOLPHA_SELECTION_V1"))`, verified by the unit test below.
+/// `keccak256("MOLPHA_SELECTION_V1")` domain separator.
 pub const SELECTION_SEED_PREFIX: [u8; 32] = [
     0x1d, 0xef, 0x81, 0x59, 0xcb, 0xcf, 0xcd, 0xfd, 0x72, 0x8d, 0x41, 0x97, 0x51, 0x9a, 0x57, 0xc0,
     0x6e, 0x24, 0x3f, 0x0d, 0x94, 0x68, 0xb4, 0xc1, 0xe5, 0xc4, 0xa2, 0x33, 0xfc, 0x56, 0x53, 0xc3,
 ];
 
-/// Derive the deterministic selection bitmap for a round.
+/// Derive the selection bitmap for a round.
 ///
 /// `seed = keccak(SELECTION_SEED_PREFIX, source_id, registry_version_be, canonical_timestamp_be)`,
 /// then `derive_group_bitmap(seed, node_count, effective_selection_size(...))`.
@@ -36,8 +34,7 @@ pub fn derive_selection_bitmap(
     )?))
 }
 
-/// [`derive_selection_bitmap`] without the `[u8; 32]` round-trip — what verification uses, since
-/// it goes straight on to a `U256` subset test.
+/// [`derive_selection_bitmap`] returning `U256` (avoids a store/load round-trip).
 pub fn derive_selection_bitmap_u256(
     source_id: &[u8; 32],
     registry_version: u32,

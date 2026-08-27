@@ -1,8 +1,4 @@
 //! Incremental coalition-key accumulation (`Σ signer pubkeys`) over secp256k1.
-//!
-//! Pure, anchor-free. Moved from the Molpha program's `utils/account_layout.rs`
-//! (only the curve-math helpers; the anchor/PDA account readers stay in the program).
-//! `error!()`/`require!()` are replaced with plain [`AttestationError`] returns.
 
 use libsecp256k1::util::{TAG_PUBKEY_EVEN, TAG_PUBKEY_ODD};
 use libsecp256k1::{
@@ -14,7 +10,7 @@ use crate::error::AttestationError;
 
 /// Load a curve point from registry-stored `(x, y)` without an on-curve re-check.
 ///
-/// Coordinates are validated at registration; the data-update hot path only needs field parsing.
+/// Coordinates are validated at registration; the hot path only needs field parsing.
 #[inline(always)]
 pub fn affine_from_stored_secp_xy(x: &[u8; 32], y: &[u8; 32]) -> Result<Affine, AttestationError> {
     if *x == [0u8; 32] || *y == [0u8; 32] {
@@ -30,7 +26,7 @@ pub fn affine_from_stored_secp_xy(x: &[u8; 32], y: &[u8; 32]) -> Result<Affine, 
     Ok(ge)
 }
 
-/// Incremental coalition accumulator (`Σ signer pubkeys`) without `PublicKey::combine` / `Vec`.
+/// Incremental coalition accumulator without `PublicKey::combine` / `Vec`.
 #[derive(Default)]
 pub struct CoalitionAccumulator {
     jacobian: Jacobian,
@@ -45,10 +41,7 @@ impl CoalitionAccumulator {
             self.jacobian = Jacobian::from_ge(&ge);
             self.has_point = true;
         } else {
-            // `add_ge_var` over `add_ge`: one fewer field multiplication and none of the
-            // constant-time `cmov` scaffolding. Every input here — registry pubkeys and a public
-            // signers bitmap — is public data already on chain, so there is no secret for the
-            // variable-time branches to leak.
+            // Variable-time add: all inputs are public on-chain data.
             self.jacobian = self.jacobian.add_ge_var(&ge, None);
         }
         Ok(())
@@ -78,9 +71,9 @@ impl CoalitionAccumulator {
     }
 }
 
-/// Build a `libsecp256k1::PublicKey` from stored affine coordinates (on-curve check, no decompress).
+/// Build a `PublicKey` from stored affine coordinates (on-curve check, no decompress).
 ///
-/// `uncompressed_scratch` is reused across the signer loop (65-byte `0x04 || x || y`).
+/// `uncompressed_scratch` is reused across the signer loop (`0x04 || x || y`).
 #[inline(always)]
 pub fn public_key_from_affine_xy(
     uncompressed_scratch: &mut [u8; 65],
@@ -141,7 +134,6 @@ mod tests {
         );
     }
 
-    /// secp256k1 field prime `p`.
     const FIELD_PRIME: [u8; 32] = [
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xFF, 0xFF,
@@ -156,7 +148,6 @@ mod tests {
         )
     }
 
-    /// `p - y`, big-endian — the y coordinate of `-P`.
     fn negate_y(y: &[u8; 32]) -> [u8; 32] {
         let mut out = [0u8; 32];
         let mut borrow = 0i16;
@@ -195,7 +186,6 @@ mod tests {
             .expect("fixture compressed key")
     }
 
-    /// Two identical signers hit the point-doubling branch of the addition, not the generic one.
     #[test]
     fn coalition_accumulator_doubles_a_repeated_signer() {
         let pk = fixture_key(0);
@@ -211,8 +201,6 @@ mod tests {
         );
     }
 
-    /// A signer set summing to the point at infinity (`P + (-P)`) has no compressed encoding and
-    /// must be rejected rather than silently normalized.
     #[test]
     fn coalition_accumulator_rejects_sum_at_infinity() {
         let pk = fixture_key(1);
@@ -228,7 +216,6 @@ mod tests {
         );
     }
 
-    /// `P + (-P) + P == P` — the infinity intermediate must not poison later additions.
     #[test]
     fn coalition_accumulator_recovers_from_infinity_intermediate() {
         let pk = fixture_key(2);

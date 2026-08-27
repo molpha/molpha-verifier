@@ -12,7 +12,6 @@ use molpha_verifier::{
 };
 
 fn main() -> Result<(), AttestationError> {
-    // 1. Decode the wire-format attestation (e.g. from instruction args).
     let payload = AttestationPayload::try_from_slice(&fixtures::PAYLOAD_BORSH)
         .expect("fixture payload borsh must decode");
     let signature = SchnorrSignature::try_from_slice(&fixtures::SIGNATURE_BORSH)
@@ -52,11 +51,7 @@ fn main() -> Result<(), AttestationError> {
         compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);
     println!("message_hash:             0x{}", hex_encode(&message_hash));
 
-    // 2. Verify aggregate Schnorr signature.
-    //
-    // `node_count` is the registry size for `payload.registry_version`. Seven signers at bitmap
-    // positions 3, 5, 7, 8, 9, 10, 11 (signersBitmap = 4008); threshold 5; redundancy_buffer 2.
-    // `ordered_signers` are the signing nodes' (x, y) pubkeys in ascending bitmap-bit order.
+    // Ordered (x, y) pubkeys in ascending signers_bitmap bit order.
     let mut ordered_signers = Vec::new();
     for_each_set_bit(&fixtures::SIGNERS_BITMAP, |i| {
         ordered_signers.push(fixtures::PUBKEYS[i]);

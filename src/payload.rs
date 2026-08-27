@@ -1,8 +1,6 @@
-//! Plain attestation payload and signature structs.
+//! Attestation payload and signature structs.
 //!
-//! Field order and types match the on-chain attestation instruction arguments so a mechanical
-//! field copy converts between the two. With the `borsh` feature enabled, structs derive
-//! `BorshSerialize` / `BorshDeserialize` for wire-format decode/encode.
+//! Field layout matches on-chain instruction args. With `borsh`, structs support wire encode/decode.
 
 /// Signed oracle attestation payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +16,7 @@ pub struct AttestationPayload {
     pub canonical_timestamp: u64,
 }
 
+/// Aggregate Schnorr signature material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
     feature = "borsh",
@@ -29,7 +28,7 @@ pub struct SchnorrSignature {
     pub signers_bitmap: [u8; 32],
 }
 
-/// A signed attestation: payload plus aggregate Schnorr signature.
+/// Payload plus aggregate Schnorr signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
     feature = "borsh",

@@ -1,28 +1,19 @@
-//! Signer resolution and high-level verification over already-parsed registry data.
+//! Signer resolution and verification over already-parsed registry data.
 //!
-//! These helpers are framework-agnostic: the caller is responsible for reading its registry
-//! accounts (owner checks, deserialization) and passing the plain [`RegistryView`] and
-//! [`NodeEntry`] slice. All Anchor / framework coupling stays in the downstream program.
-//!
-//! Resolution binds each set bit of `signers_bitmap` to `registry.nodes[bit]` — the immutable
-//! snapshot model. Node status is deliberately ignored: a node deactivated in a later version
-//! remains valid evidence for historical snapshots.
+//! Framework-agnostic: the caller reads accounts and passes [`RegistryView`] + [`NodeEntry`]s.
+//! Each set bit of `signers_bitmap` binds to `registry.nodes[bit]`. Node status is ignored —
+//! a node deactivated later remains valid evidence for historical snapshots.
 
 use ethnum::U256;
 
 use crate::verify::{verify_aggregate_over_hash_core, verify_attestation_core};
 use crate::{
     bitmap::{bitmap_load, for_each_set_bit_u256},
-    coalition::CoalitionAccumulator, Attestation, AttestationError, NodeEntry, RegistryView,
-    SignerXy, SchnorrSignature,
+    coalition::CoalitionAccumulator,
+    Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature, SignerXy,
 };
 
-/// Walk the set bits of `signers` in ascending order, bind each to its registry slot and the
-/// entry supplied for it, and hand the validated pair to `visit`.
-///
-/// This is the whole of signer resolution. The public `resolve_*` helpers collect it into a
-/// `Vec`; verification instead sums straight into the coalition accumulator, which is why the
-/// binding checks live here rather than in the collecting wrappers.
+/// Walk set bits of `signers` in ascending order; bind each to its registry slot and entry.
 fn for_each_resolved_signer<F>(
     nodes: &[[u8; 32]],
     node_count: u16,
@@ -57,10 +48,9 @@ where
     Ok(())
 }
 
-/// Resolve selected signer entries against an immutable registry snapshot.
+/// Resolve selected signers against an immutable registry snapshot.
 ///
-/// Entries must be provided in ascending signer-bit order. Each entry's `account` must equal
-/// `nodes[bit]` for the corresponding set bit.
+/// Entries must be in ascending signer-bit order; each `account` must equal `nodes[bit]`.
 pub fn resolve_registry_signers(
     nodes: &[[u8; 32]],
     node_count: u16,
@@ -76,11 +66,7 @@ pub fn resolve_registry_signers(
     Ok(ordered)
 }
 
-/// Like [`resolve_registry_signers`] but also returns each signer's bit position.
-///
-/// Used by callers that need to re-partition a resolved union bitmap back into per-statement
-/// subsets — e.g. equivocation punishment, which resolves the union of two signer sets once and
-/// then splits the result back into each statement's ordered signers.
+/// Like [`resolve_registry_signers`], also returning each signer's bit position.
 pub fn resolve_registry_signers_indexed(
     nodes: &[[u8; 32]],
     node_count: u16,
@@ -128,9 +114,9 @@ pub fn verify_attestation_resolved(
     )
 }
 
-/// Verify an aggregate signature over an arbitrary message hash after resolving signers.
+/// Verify an aggregate over an arbitrary message hash after resolving signers.
 ///
-/// Returns `Ok(true)` when valid, `Ok(false)` when invalid (slashable), `Err` on malformed input.
+/// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed input.
 pub fn verify_aggregate_over_hash_resolved(
     registry: &RegistryView<'_>,
     signature: &SchnorrSignature,

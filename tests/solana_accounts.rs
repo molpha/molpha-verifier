@@ -1,9 +1,4 @@
-//! External-consumer view of the `solana` feature.
-//!
-//! The module's own unit tests cover validation behaviour. This file exists to prove the exported
-//! surface is actually usable from outside the crate — that the lifetimes on `RegistryAccount`
-//! work in an instruction-handler shape, and that `AccountError` flows into `ProgramError` with a
-//! plain `?`.
+//! Integration tests for the exported `solana` feature surface.
 
 #![cfg(all(feature = "solana", feature = "fixtures"))]
 
@@ -24,11 +19,8 @@ use solana_pubkey::Pubkey;
 
 const PROGRAM_ID: Pubkey = Pubkey::new_from_array([7u8; 32]);
 
-/// Bits 3, 5, 7, 8, 9, 10, 11 of the fixture's `signersBitmap = 4008`.
 const SIGNER_BITS: [usize; 7] = [3, 5, 7, 8, 9, 10, 11];
 
-/// An Anchor-shaped instruction handler: registry account plus `remaining_accounts`, returning
-/// `ProgramError` via `?`.
 fn handler(
     program_id: &Pubkey,
     registry: &AccountInfo<'_>,
@@ -47,11 +39,8 @@ fn node_owner(index: usize) -> [u8; 32] {
 }
 
 fn node_pda(index: usize) -> (Pubkey, u8) {
-    Pubkey::derive_program_address(
-        &[NODE_SEED_PREFIX, node_owner(index).as_ref()],
-        &PROGRAM_ID,
-    )
-    .expect("node PDA")
+    Pubkey::derive_program_address(&[NODE_SEED_PREFIX, node_owner(index).as_ref()], &PROGRAM_ID)
+        .expect("node PDA")
 }
 
 fn registry_pda(version: u32) -> (Pubkey, u8) {
@@ -84,14 +73,7 @@ fn fill_node_account(
 fn node_account_data(index: usize) -> Vec<u8> {
     let (x, y) = PUBKEYS[index];
     let mut data = vec![0u8; NODE_ACCOUNT_LEN];
-    fill_node_account(
-        &mut data,
-        &node_owner(index),
-        &x,
-        &y,
-        0,
-        node_pda(index).1,
-    );
+    fill_node_account(&mut data, &node_owner(index), &x, &y, 0, node_pda(index).1);
     data
 }
 
@@ -126,8 +108,7 @@ fn attestation() -> Attestation {
     }
 }
 
-/// Owned buffers behind the `AccountInfo`s. `AccountInfo` borrows lamports and data mutably, so
-/// the storage has to outlive them.
+/// Owned buffers behind `AccountInfo`s.
 struct Ledger {
     registry_key: Pubkey,
     registry_data: Vec<u8>,
@@ -196,8 +177,6 @@ fn handler_surfaces_account_errors_as_program_errors() {
 
 #[test]
 fn registry_account_can_be_held_and_reused_across_calls() {
-    // The borrow guard must survive being bound to a local and read from repeatedly — this is the
-    // shape a program uses when it verifies several attestations against one snapshot.
     let mut ledger = Ledger::new();
     let (registry_info, _nodes) = ledger.accounts();
     let registry = RegistryAccount::load(&registry_info, &PROGRAM_ID).expect("load registry");
@@ -210,7 +189,6 @@ fn registry_account_can_be_held_and_reused_across_calls() {
         node_pda(SIGNER_BITS[0]).0.to_bytes()
     );
 
-    // Still readable after the first view is dropped.
     assert_eq!(registry.view().redundancy_buffer, REDUNDANCY_BUFFER);
     assert_eq!(*registry.key(), registry_pda(REGISTRY_VERSION).0);
 }

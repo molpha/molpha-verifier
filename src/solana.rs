@@ -1,45 +1,26 @@
-//! Solana account adapters — verify straight from `&[AccountInfo]`.
+//! Solana account adapters — verify from `&[AccountInfo]`.
 //!
-//! The rest of this crate is framework-agnostic: the caller reads its own accounts and passes
-//! plain [`RegistryView`] / [`NodeEntry`] data in. This module is the opt-in exception. Enabled
-//! with the `solana` feature, it takes the Molpha program's own `Registry` and `Node` accounts as
-//! `&AccountInfo`, validates and parses them, and calls [`verify_attestation_resolved`] — so a
-//! consumer can hand the verifier its accounts and be done.
+//! Opt-in (`solana` feature): validates Molpha `Registry` / `Node` accounts and calls
+//! [`verify_attestation_resolved`]. Reads Anchor layouts (8-byte discriminator + body) without
+//! depending on `anchor-lang`.
 //!
-//! Anchor accounts are an 8-byte discriminator followed by a Borsh (or, for `zero_copy`, a
-//! `repr(C)`) body, so no `anchor-lang` dependency is needed to read them. Anchor consumers pass
-//! `to_account_info()`; native programs pass their `AccountInfo`s directly.
+//! # Checks
 //!
-//! # What is validated
+//! Before trusting account data:
+//! 1. **Owner** — `account.owner == program_id`
+//! 2. **Discriminator** — matches [`REGISTRY_DISCRIMINATOR`] / [`NODE_DISCRIMINATOR`]
+//! 3. **Length** — at least [`REGISTRY_ACCOUNT_LEN`] / [`NODE_ACCOUNT_LEN`]
+//! 4. **Well-formedness** — `Node` status tag is in range
 //!
-//! For every account, before any field is trusted:
-//!
-//! 1. **Owner** — `account.owner == program_id`.
-//! 2. **Discriminator** — the leading 8 bytes match [`REGISTRY_DISCRIMINATOR`] /
-//!    [`NODE_DISCRIMINATOR`].
-//! 3. **Length** — at least [`REGISTRY_ACCOUNT_LEN`] / [`NODE_ACCOUNT_LEN`].
-//! 4. **PDA** — the account key is the canonical program address for its own seeds and stored
-//!    bump. This is load-bearing, not ceremony: the program also creates `Registry`-shaped
-//!    accounts under other seed prefixes (benchmark fixtures), and an owner + discriminator check
-//!    alone would accept them.
-//! 5. **Well-formedness** — a `Node`'s `status` tag must be one Anchor could have written.
-//!
-//! Node *status* is range-checked but not otherwise interpreted. Verification binds to an
-//! immutable, version-addressed registry snapshot, so a node deactivated in a later version
-//! remains valid evidence for a historical one.
-//!
-//! On the hot path the `Node` body is read at fixed offsets — only the secp256k1 coordinates and
-//! the `status` tag are consulted. The offsets in [`RegistryAccount`] mirror the program's
-//! `Registry` account. They are pinned to the deployed program's layout; the account
-//! discriminators below fail closed if the type is renamed, and the length checks fail closed if
-//! fields are removed. Appending fields stays compatible.
+//! Node status is range-checked only; historical snapshots may still use deactivated nodes.
+//! Body fields are read at fixed offsets pinned to the program layout. Discriminator / length
+//! checks fail closed on rename / truncation; appending fields stays compatible.
 //!
 //! # Usage
 //! ```ignore
 //! use molpha_verifier::solana::verify_attestation_accounts;
 //!
-//! // `node_accounts` are the signers' `Node` accounts in ascending signers_bitmap bit order —
-//! // e.g. Anchor's `ctx.remaining_accounts`.
+//! // `node_accounts`: signer Node accounts in ascending signers_bitmap bit order.
 //! verify_attestation_accounts(
 //!     &attestation,
 //!     &registry_account,
@@ -60,31 +41,29 @@ use crate::{
     Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature,
 };
 
-/// `Registry` PDA seed prefix: `[REGISTRY_SEED_PREFIX, version.to_le_bytes(), [bump]]`.
+/// Registry PDA seeds: `[REGISTRY_SEED_PREFIX, version.to_le_bytes(), [bump]]`.
 pub const REGISTRY_SEED_PREFIX: &[u8] = b"molpha_registry";
 
-/// `Node` PDA seed prefix: `[NODE_SEED_PREFIX, owner, [bump]]`.
+/// Node PDA seeds: `[NODE_SEED_PREFIX, owner, [bump]]`.
 pub const NODE_SEED_PREFIX: &[u8] = b"molpha_node";
 
-/// Anchor account discriminator for `Registry` — `sha256("account:Registry")[..8]`.
+/// Anchor discriminator for `Registry` (`sha256("account:Registry")[..8]`).
 pub const REGISTRY_DISCRIMINATOR: [u8; 8] = [47, 174, 110, 246, 184, 182, 252, 218];
 
-/// Anchor account discriminator for `Node` — `sha256("account:Node")[..8]`.
+/// Anchor discriminator for `Node` (`sha256("account:Node")[..8]`).
 pub const NODE_DISCRIMINATOR: [u8; 8] = [208, 53, 1, 3, 49, 122, 180, 49];
 
-/// Length of the discriminator every Anchor account is prefixed with.
+/// Anchor account discriminator length.
 pub const DISCRIMINATOR_LEN: usize = 8;
 
-/// Serialized length of a `Registry` account, discriminator included (`Registry::SPACE`).
+/// Serialized `Registry` account length including discriminator.
 pub const REGISTRY_ACCOUNT_LEN: usize = 8_208;
 
-/// Serialized length of a `Node` account, discriminator included (`Node::SPACE`).
+/// Serialized `Node` account length including discriminator.
 pub const NODE_ACCOUNT_LEN: usize = 168;
 
-// `Registry` is `#[account(zero_copy)] #[repr(C)]`, so its body is read at fixed offsets rather
-// than deserialized: `version: u32`, `node_count: u16`, `redundancy_buffer: u8`, `bump: u8`, then
-// `nodes: [[u8; 32]; MAX_REGISTRY_NODES]`. Max field alignment is 4 and the header is exactly 8
-// bytes, so there is no interior or trailing padding.
+// Registry is zero_copy / repr(C): version(u32), node_count(u16), redundancy_buffer(u8), bump(u8),
+// then nodes[[u8;32]; 256]. Header is 8 bytes with no padding.
 const REGISTRY_VERSION_OFFSET: usize = DISCRIMINATOR_LEN;
 const REGISTRY_NODE_COUNT_OFFSET: usize = REGISTRY_VERSION_OFFSET + 4;
 const REGISTRY_REDUNDANCY_BUFFER_OFFSET: usize = REGISTRY_NODE_COUNT_OFFSET + 2;
@@ -94,59 +73,56 @@ const REGISTRY_NODES_LEN: usize = MAX_REGISTRY_NODES * 32;
 
 const _: () = assert!(REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN == REGISTRY_ACCOUNT_LEN);
 
-// `Node` is a plain `#[account]` with a Borsh body: fixed-size fields back to back, no padding.
-// Verification reads pubkey coordinates and the `status` tag at fixed offsets.
+// Node is Borsh: owner, pubkey_x, pubkey_y, status, then trailing fields through bump.
 const NODE_OWNER_OFFSET: usize = DISCRIMINATOR_LEN;
 const NODE_PUBKEY_X_OFFSET: usize = NODE_OWNER_OFFSET + 32;
 const NODE_PUBKEY_Y_OFFSET: usize = NODE_PUBKEY_X_OFFSET + 32;
 const NODE_STATUS_OFFSET: usize = NODE_PUBKEY_Y_OFFSET + 32;
-/// `ip` (4) + `port` (2) + seven 8-byte amount/timestamp fields + `bump` (1).
+// ip(4) + port(2) + seven u64 fields + bump(1)
 const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 7 * 8;
 
-// Fails to compile if the mirrored layout above ever stops adding up to the declared length.
 const _: () = assert!(NODE_BUMP_OFFSET + 1 == NODE_ACCOUNT_LEN);
 
-/// Highest `NodeStatus` tag the program writes (`Tombstoned = 3`).
+/// Highest `NodeStatus` tag (`Tombstoned = 3`).
 const NODE_STATUS_MAX_TAG: u8 = 3;
 
-/// Base for [`AccountError::code`] — `0x4D4F_0000`, i.e. ASCII `"MO"` in the high half.
+/// Base for [`AccountError::code`] (`0x4D4F_0000` = ASCII `"MO"`).
 pub const ERROR_CODE_BASE: u32 = 0x4D4F_0000;
 
-/// Failure to turn accounts into verified attestation inputs.
+/// Account I/O or verification failure.
 ///
-/// Wraps [`AttestationError`] so a single `?` covers both account I/O and cryptographic
-/// verification. Downstream programs typically map this at the instruction boundary.
+/// Wraps [`AttestationError`] so one `?` covers both paths.
 #[cfg_attr(feature = "thiserror", derive(thiserror::Error))]
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum AccountError {
-    /// Verification ran and failed. See the wrapped [`AttestationError`].
+    /// Verification failed.
     #[cfg_attr(feature = "thiserror", error("{0}"))]
     Attestation(AttestationError),
-    /// An account's data is already mutably borrowed elsewhere.
+    /// Account data already mutably borrowed.
     #[cfg_attr(feature = "thiserror", error("account data is already borrowed"))]
     AccountBorrowFailed,
-    /// An account is not owned by the Molpha program.
+    /// Account not owned by the program.
     #[cfg_attr(feature = "thiserror", error("account is not owned by the program"))]
     InvalidAccountOwner,
-    /// The registry account's discriminator or length does not match `Registry`.
+    /// Registry discriminator or length mismatch.
     #[cfg_attr(
         feature = "thiserror",
         error("registry account discriminator or length mismatch")
     )]
     InvalidRegistryAccount,
-    /// The registry account is not the canonical PDA for its version and stored bump.
+    /// Registry is not the canonical PDA for its version.
     #[cfg_attr(
         feature = "thiserror",
         error("registry account is not the canonical PDA for its version")
     )]
     InvalidRegistryPda,
-    /// A node account's discriminator, length, or pubkey/status fields do not match `Node`.
+    /// Node discriminator, length, or body mismatch.
     #[cfg_attr(
         feature = "thiserror",
         error("node account discriminator, length, or body mismatch")
     )]
     InvalidNodeAccount,
-    /// A node account is not the canonical PDA for its owner and stored bump.
+    /// Node is not the canonical PDA for its owner.
     #[cfg_attr(
         feature = "thiserror",
         error("node account is not the canonical PDA for its owner")
@@ -155,8 +131,7 @@ pub enum AccountError {
 }
 
 impl AccountError {
-    /// Stable numeric code, [`ERROR_CODE_BASE`]-offset. Wrapped [`AttestationError`]s collapse to
-    /// a single code; match on the variant if the inner reason matters.
+    /// Stable numeric code (`ERROR_CODE_BASE` + offset). Wrapped attestation errors share code 0.
     pub fn code(&self) -> u32 {
         let offset = match self {
             Self::Attestation(_) => 0,
@@ -191,10 +166,9 @@ struct Signer {
 
 impl Signer {
     fn from_node_account_bytes(data: &[u8]) -> Result<Self, AccountError> {
-        // if data.len() < NODE_ACCOUNT_LEN || data[..DISCRIMINATOR_LEN] != NODE_DISCRIMINATOR {
-        //     return Err(AccountError::InvalidNodeAccount);
-        // }
-        // The one check the skipped fields would otherwise have performed.
+        if data.len() < NODE_ACCOUNT_LEN || data[..DISCRIMINATOR_LEN] != NODE_DISCRIMINATOR {
+            return Err(AccountError::InvalidNodeAccount);
+        }
         if data[NODE_STATUS_OFFSET] > NODE_STATUS_MAX_TAG {
             return Err(AccountError::InvalidNodeAccount);
         }
@@ -205,7 +179,6 @@ impl Signer {
     }
 }
 
-/// Fixed 32-byte read. The caller has already length-checked `data`.
 #[inline]
 fn read_32(data: &[u8], offset: usize) -> [u8; 32] {
     data[offset..offset + 32]
@@ -213,19 +186,14 @@ fn read_32(data: &[u8], offset: usize) -> [u8; 32] {
         .expect("length checked by caller")
 }
 
-/// A validated, borrowed `Registry` account.
-///
-/// Holds the account-data borrow for its lifetime so [`RegistryView`] can point straight at the
-/// 8 KB `nodes` array without copying it.
+/// Validated, borrowed `Registry` account (holds the data borrow for zero-copy `nodes`).
 pub struct RegistryAccount<'a> {
     key: Pubkey,
     data: Ref<'a, [u8]>,
 }
 
 impl<'a> RegistryAccount<'a> {
-    /// Borrow, validate, and bind a `Registry` account.
-    ///
-    /// Runs the full owner / discriminator / length / PDA check set described in the module docs.
+    /// Borrow and validate a `Registry` account (owner / discriminator / length).
     pub fn load(account: &'a AccountInfo<'_>, program_id: &Pubkey) -> Result<Self, AccountError> {
         if account.owner != program_id {
             return Err(AccountError::InvalidAccountOwner);
@@ -233,7 +201,6 @@ impl<'a> RegistryAccount<'a> {
         let data = account
             .try_borrow_data()
             .map_err(|_| AccountError::AccountBorrowFailed)?;
-        // Narrow `Ref<&mut [u8]>` to `Ref<[u8]>` so the guard needs only one lifetime parameter.
         let data = Ref::map(data, |bytes| &**bytes);
 
         if data.len() < REGISTRY_ACCOUNT_LEN || data[..DISCRIMINATOR_LEN] != REGISTRY_DISCRIMINATOR
@@ -248,7 +215,6 @@ impl<'a> RegistryAccount<'a> {
         Ok(registry)
     }
 
-    /// The account's address.
     pub fn key(&self) -> &Pubkey {
         &self.key
     }
@@ -277,20 +243,17 @@ impl<'a> RegistryAccount<'a> {
         self.data[REGISTRY_BUMP_OFFSET]
     }
 
-    /// The full ordered node-address array. Only `[..node_count()]` is populated.
+    /// Full ordered node-address array; only `[..node_count()]` is populated.
     pub fn nodes(&self) -> &[[u8; 32]] {
         let bytes = &self.data[REGISTRY_NODES_OFFSET..REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN];
-        // SAFETY: `bytes` is exactly `MAX_REGISTRY_NODES * 32` bytes (the slice bounds are
-        // constants and `load` checked `data.len() >= REGISTRY_ACCOUNT_LEN`). `[u8; 32]` has
-        // alignment 1 and no invalid bit patterns, so any byte pointer is a valid, correctly
-        // aligned `*const [u8; 32]`. The returned slice borrows `self`, so it cannot outlive the
-        // account-data guard.
+        // SAFETY: `bytes` is exactly `MAX_REGISTRY_NODES * 32` (bounds checked in `load`).
+        // `[u8; 32]` has alignment 1; returned slice borrows `self` with the data guard.
         unsafe {
             core::slice::from_raw_parts(bytes.as_ptr().cast::<[u8; 32]>(), MAX_REGISTRY_NODES)
         }
     }
 
-    /// Framework-agnostic view for the resolution / verification helpers.
+    /// Framework-agnostic view for resolution / verification.
     pub fn view(&self) -> RegistryView<'_> {
         RegistryView {
             version: self.version(),
@@ -301,7 +264,6 @@ impl<'a> RegistryAccount<'a> {
     }
 }
 
-/// Header fields only — the 8 KB `nodes` array is elided.
 impl core::fmt::Debug for RegistryAccount<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RegistryAccount")
@@ -344,7 +306,7 @@ pub fn resolve_nodes(
         .collect()
 }
 
-/// Verify an attestation directly from its `Registry` and signer `Node` accounts.
+/// Verify an attestation from its `Registry` and signer `Node` accounts.
 pub fn verify_attestation_accounts(
     attestation: &Attestation,
     registry_account: &AccountInfo<'_>,
@@ -357,7 +319,7 @@ pub fn verify_attestation_accounts(
     Ok(())
 }
 
-/// Verify an aggregate signature over an arbitrary message hash from accounts (dispute / slash).
+/// Verify an aggregate over an arbitrary message hash from accounts (dispute / slash).
 ///
 /// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed accounts or input.
 #[allow(clippy::too_many_arguments)]
@@ -365,11 +327,14 @@ pub fn verify_aggregate_over_hash_accounts(
     registry_account: &AccountInfo<'_>,
     signature: SchnorrSignature,
     message_hash: &[u8; 32],
+    registry_version: u32,
     node_accounts: &[AccountInfo<'_>],
     program_id: &Pubkey,
 ) -> Result<bool, AccountError> {
     let registry = RegistryAccount::load(registry_account, program_id)?;
-
+    if registry.version() != registry_version {
+        return Err(AccountError::InvalidRegistryAccount);
+    }
     let entries = resolve_nodes(node_accounts, program_id)?;
     Ok(verify_aggregate_over_hash_resolved(
         &registry.view(),
@@ -400,11 +365,8 @@ mod tests {
     }
 
     fn node_pda(index: usize) -> (Pubkey, u8) {
-        Pubkey::derive_program_address(
-            &[NODE_SEED_PREFIX, node_owner(index).as_ref()],
-            &PROGRAM_ID,
-        )
-        .expect("node PDA")
+        Pubkey::derive_program_address(&[NODE_SEED_PREFIX, node_owner(index).as_ref()], &PROGRAM_ID)
+            .expect("node PDA")
     }
 
     fn registry_pda(version: u32) -> (Pubkey, u8) {
@@ -415,7 +377,6 @@ mod tests {
         .expect("registry PDA")
     }
 
-    /// Write the fields verification reads from a `Node` account buffer.
     fn fill_node_account(
         data: &mut [u8],
         owner: &[u8; 32],
@@ -433,7 +394,6 @@ mod tests {
         data[NODE_BUMP_OFFSET] = bump;
     }
 
-    /// Serialized `Node` account for fixture node `index`, at its canonical PDA.
     fn node_account_data(index: usize) -> Vec<u8> {
         let (_, bump) = node_pda(index);
         let (x, y) = PUBKEYS[index];
@@ -442,7 +402,6 @@ mod tests {
         data
     }
 
-    /// Serialized `Registry` account holding the 12 fixture node PDAs, at its canonical PDA.
     fn registry_account_data(version: u32) -> Vec<u8> {
         let (_, bump) = registry_pda(version);
         let mut data = vec![0u8; REGISTRY_ACCOUNT_LEN];
@@ -483,10 +442,7 @@ mod tests {
         indices
     }
 
-    /// Owned backing storage for a set of `AccountInfo`s.
-    ///
-    /// `AccountInfo` borrows its lamports and data mutably, so the buffers must outlive it and be
-    /// handed out one `&mut` at a time — hence the two-step build/borrow.
+    /// Owned buffers behind `AccountInfo`s.
     struct Accounts {
         registry_key: Pubkey,
         registry_data: Vec<u8>,
@@ -538,7 +494,6 @@ mod tests {
                 .collect()
         }
 
-        /// Split borrow so the registry and node `AccountInfo`s can coexist.
         fn split(&mut self) -> (AccountInfo<'_>, Vec<AccountInfo<'_>>) {
             let registry = AccountInfo::new(
                 &self.registry_key,
@@ -562,12 +517,9 @@ mod tests {
         }
     }
 
-    // ---- layout constants -------------------------------------------------
-
     #[test]
     fn discriminators_match_anchor_derivation() {
-        // Anchor: sha256("account:<Name>")[..8]. Recomputed here so a rename in the program is
-        // caught by a failing IDL diff rather than a silently-wrong constant.
+        // Anchor: sha256("account:<Name>")[..8]
         use sha2::{Digest, Sha256};
         let registry: [u8; 8] = Sha256::digest(b"account:Registry")[..8].try_into().unwrap();
         let node: [u8; 8] = Sha256::digest(b"account:Node")[..8].try_into().unwrap();
@@ -601,11 +553,8 @@ mod tests {
         {
             assert_eq!(*node, node_pda(index).0.to_bytes());
         }
-        // Slots past node_count stay zeroed.
         assert_eq!(nodes[REGISTERED_NODE_COUNT as usize], [0u8; 32]);
     }
-
-    // ---- registry account -------------------------------------------------
 
     #[test]
     fn registry_account_exposes_header_fields() {
@@ -661,8 +610,7 @@ mod tests {
 
     #[test]
     fn registry_load_accepts_non_canonical_pda() {
-        // Owner + discriminator + length are checked; the account key is not re-derived from body
-        // fields (benchmark fixtures use other seed prefixes with the same layout).
+        // Owner/discriminator/length checked; key is not re-derived from body.
         let mut accounts = Accounts::new();
         accounts.registry_key = Pubkey::new_from_array([0x33u8; 32]);
         let info = accounts.registry();
@@ -710,8 +658,6 @@ mod tests {
             AccountError::AccountBorrowFailed
         );
     }
-
-    // ---- node accounts ----------------------------------------------------
 
     #[test]
     fn resolve_nodes_returns_entries_in_account_order() {
@@ -776,7 +722,6 @@ mod tests {
     #[test]
     fn resolve_nodes_rejects_invalid_status_tag() {
         let mut accounts = Accounts::new();
-        // `status` sits right after the discriminator, owner, and both coordinates.
         accounts.node_data[0][DISCRIMINATOR_LEN + 96] = 9;
         let infos = accounts.nodes();
         assert_eq!(
@@ -791,12 +736,15 @@ mod tests {
         accounts.node_keys[2] = Pubkey::new_from_array([0x44u8; 32]);
         let infos = accounts.nodes();
         let entries = resolve_nodes(&infos, &PROGRAM_ID).expect("resolve nodes");
-        assert_eq!(entries[2].account, Pubkey::new_from_array([0x44u8; 32]).to_bytes());
+        assert_eq!(
+            entries[2].account,
+            Pubkey::new_from_array([0x44u8; 32]).to_bytes()
+        );
     }
 
     #[test]
     fn resolve_nodes_accepts_swapped_owner_field() {
-        // `owner` is not consulted during resolution — only pubkey coordinates and status tag.
+        // Owner field is not consulted during resolution.
         let mut accounts = Accounts::new();
         let other_owner = node_owner(1);
         accounts.node_data[0][DISCRIMINATOR_LEN..DISCRIMINATOR_LEN + 32]
@@ -815,14 +763,11 @@ mod tests {
 
     #[test]
     fn resolve_nodes_accepts_non_active_status() {
-        // A node deactivated in a later version is still valid evidence for this snapshot.
         let mut accounts = Accounts::new();
         accounts.node_data[0][DISCRIMINATOR_LEN + 96] = 3; // Tombstoned
         let infos = accounts.nodes();
         assert!(resolve_nodes(&infos, &PROGRAM_ID).is_ok());
     }
-
-    // ---- node account framing ---------------------------------------------
 
     #[test]
     fn node_status_max_tag_is_enforced() {
@@ -864,14 +809,9 @@ mod tests {
         }
         for tag in NODE_STATUS_MAX_TAG + 1..=255u8 {
             data[NODE_STATUS_OFFSET] = tag;
-            assert!(
-                Signer::from_node_account_bytes(&data).is_err(),
-                "tag {tag}",
-            );
+            assert!(Signer::from_node_account_bytes(&data).is_err(), "tag {tag}",);
         }
     }
-
-    // ---- end-to-end -------------------------------------------------------
 
     #[test]
     fn verify_attestation_accounts_accepts_fixture() {
@@ -883,7 +823,6 @@ mod tests {
 
     #[test]
     fn verify_attestation_accounts_rejects_version_mismatch() {
-        // A genuine, canonically-addressed registry — just the wrong snapshot.
         let mut accounts = Accounts::with_version(REGISTRY_VERSION + 1);
         let (registry, nodes) = accounts.split();
         assert_eq!(
@@ -895,7 +834,6 @@ mod tests {
 
     #[test]
     fn verify_attestation_accounts_rejects_node_order_swap() {
-        // Slot binding is positional: entry `n` must be `registry.nodes[nth set bit]`.
         let mut accounts = Accounts::new();
         accounts.node_keys.swap(0, 1);
         accounts.node_data.swap(0, 1);
@@ -923,7 +861,6 @@ mod tests {
 
     #[test]
     fn verify_attestation_accounts_rejects_unregistered_signer() {
-        // A well-formed node at its canonical PDA, but not in this registry snapshot.
         let mut accounts = Accounts::new();
         accounts.node_keys[0] = node_pda(50).0;
         accounts.node_data[0] = {
@@ -965,6 +902,7 @@ mod tests {
             &registry,
             attestation.signature,
             &message_hash,
+            REGISTRY_VERSION,
             &nodes,
             &PROGRAM_ID,
         )
@@ -984,19 +922,15 @@ mod tests {
             &registry,
             attestation.signature,
             &message_hash,
+            REGISTRY_VERSION,
             &nodes,
             &PROGRAM_ID,
         )
         .expect("dispute path must run"));
     }
 
-    // ---- validation ordering ----------------------------------------------
-
-    /// Scalar above the curve order — invalid, so the dispute path verifies it as false rather
-    /// than erroring.
     const INVALID_SCALAR: [u8; 32] = [0xFF; 32];
 
-    /// Node accounts are parsed before attestation fields are checked.
     #[test]
     fn malformed_node_account_errors_before_version_mismatch() {
         let mut accounts = Accounts::with_version(REGISTRY_VERSION + 1);
@@ -1024,7 +958,6 @@ mod tests {
         );
     }
 
-    /// An out-of-range scalar is a verified-invalid statement, not malformed input.
     #[test]
     fn dispute_path_reports_invalid_scalar_as_false() {
         let mut accounts = Accounts::new();
@@ -1038,14 +971,14 @@ mod tests {
             &registry,
             signature,
             &message_hash,
+            REGISTRY_VERSION,
             &nodes,
             &PROGRAM_ID,
         )
         .expect("invalid scalar is a verdict, not an error"));
     }
 
-    /// ...but a malformed `Node` account still errors, even alongside an invalid scalar: the
-    /// caller must not be handed a slashable verdict over a signer set that was never validated.
+    /// Malformed Node must error even with an invalid scalar (no slashable verdict on bad input).
     #[test]
     fn dispute_path_errors_on_malformed_node_even_with_invalid_scalar() {
         let mut accounts = Accounts::new();
@@ -1061,6 +994,7 @@ mod tests {
                 &registry,
                 signature,
                 &message_hash,
+                REGISTRY_VERSION,
                 &nodes,
                 &PROGRAM_ID,
             )
@@ -1068,8 +1002,6 @@ mod tests {
             AccountError::InvalidNodeAccount
         );
     }
-
-    // ---- errors -----------------------------------------------------------
 
     #[test]
     fn error_codes_are_distinct_and_outside_anchor_ranges() {

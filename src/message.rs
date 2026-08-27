@@ -4,17 +4,13 @@ use solana_keccak_hasher::hashv;
 
 use crate::payload::AttestationPayload;
 
-/// `bytes32(keccak256("MOLPHA_MESSAGE_V1"))` — Message prefix.
-///
-/// Value: `keccak256(bytes("MOLPHA_MESSAGE_V1"))`, verified by the unit test below.
+/// `keccak256("MOLPHA_MESSAGE_V1")` domain separator.
 pub const MESSAGE_PREFIX: [u8; 32] = [
     0xa7, 0x55, 0x23, 0xa2, 0xab, 0x7b, 0x71, 0x8d, 0x9c, 0xff, 0xd2, 0xfa, 0x97, 0xed, 0x06, 0x9f,
     0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22, 0xf7, 0x0e, 0x7f, 0xe7,
 ];
 
-/// Compute the attestation message hash.
-///
-/// Matches message construction in the Molpha program:
+/// Attestation message hash matching the Molpha program:
 /// ```text
 /// keccak256(abi.encodePacked(
 ///     MESSAGE_PREFIX, value, sourceId, registryVersion, signaturesRequired,

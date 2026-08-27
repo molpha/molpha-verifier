@@ -1,7 +1,4 @@
-//! secp256k1 scalar arithmetic and the Schnorr→ECDSA recovery trick.
-//!
-//! Pure, anchor-free. Moved verbatim from the Molpha program's `utils/schnorr.rs`
-//! (`MolphaError` → [`AttestationError`]).
+//! Secp256k1 scalar arithmetic and the Schnorr→ECDSA recovery trick.
 
 use solana_keccak_hasher::hashv;
 
@@ -12,7 +9,6 @@ const SECP256K1_ORDER: [u8; 32] = [
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
 ];
 
-/// secp256k1 curve order / 2 (rounded down).
 const SECP256K1_ORDER_HALF: [u8; 32] = [
     0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
@@ -23,7 +19,7 @@ const SECP256K1_ORDER_MINUS_TWO: [u8; 32] = [
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x3F,
 ];
 
-// secp256k1 curve order n, little-endian u64 limbs (least significant limb first).
+// Curve order n as little-endian u64 limbs.
 const SECP256K1_ORDER_LIMBS_LE: [u64; 4] = [
     0xBFD25E8CD0364141,
     0xBAAEDCE6AF48A03B,
@@ -31,11 +27,7 @@ const SECP256K1_ORDER_LIMBS_LE: [u64; 4] = [
     0xFFFFFFFFFFFFFFFF,
 ];
 
-// mu = floor(2^512 / n), little-endian u64 limbs.
-//
-// Derived from:
-//   n  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-//   mu = floor(2^512 / n)
+// Barrett μ = floor(2^512 / n), little-endian u64 limbs.
 const SECP256K1_ORDER_BARRETT_MU_LIMBS_LE: [u64; 5] = [
     0x402DA1732FC9BEC0,
     0x4551231950B75FC4,
@@ -43,10 +35,6 @@ const SECP256K1_ORDER_BARRETT_MU_LIMBS_LE: [u64; 5] = [
     0x0000000000000000,
     0x0000000000000001,
 ];
-
-// The 256-bit compare / subtract / reduce helpers all work in 64-bit limbs rather than byte at a
-// time: four iterations instead of thirty-two, on a VM whose registers are 64-bit anyway. The
-// big-endian `[u8; 32]` signatures are kept because that is how scalars are stored and hashed.
 
 #[inline]
 fn cmp_be(a: &[u8; 32], b: &[u8; 32]) -> core::cmp::Ordering {
@@ -57,7 +45,7 @@ pub fn secp256k1_scalar_is_valid_nonzero(x: &[u8; 32]) -> bool {
     !is_zero(x) && cmp_be(x, &SECP256K1_ORDER) == core::cmp::Ordering::Less
 }
 
-/// Return `-value mod n` for a canonical secp256k1 scalar.
+/// `-value mod n` for a canonical secp256k1 scalar.
 pub(crate) fn negate_mod_n(value: &[u8; 32]) -> [u8; 32] {
     if is_zero(value) {
         [0u8; 32]
@@ -66,10 +54,7 @@ pub(crate) fn negate_mod_n(value: &[u8; 32]) -> [u8; 32] {
     }
 }
 
-/// Normalize an ECDSA signature to "low-s" form.
-///
-/// Some secp256k1 recovery implementations reject high-s signatures.
-/// If `s > n/2`, converts `(r, s)` to `(r, n-s)` and flips `recovery_id` parity bit.
+/// Normalize ECDSA `s` to low-s form (`s <= n/2`), flipping `recovery_id` parity if needed.
 pub fn secp256k1_ecdsa_normalize_low_s(
     mut recovery_id: u8,
     signature_64: &mut [u8; 64],
@@ -83,7 +68,6 @@ pub fn secp256k1_ecdsa_normalize_low_s(
         recovery_id ^= 1;
     }
 
-    // Ensure non-zero `s` after normalization.
     if signature_64[32..64].iter().all(|b| *b == 0) {
         return Err(AttestationError::InvalidSignature);
     }
@@ -91,22 +75,19 @@ pub fn secp256k1_ecdsa_normalize_low_s(
     Ok(recovery_id)
 }
 
-/// `a - b (mod 2^256)` — wraps on underflow, as the byte-wise version did.
+/// `a - b (mod 2^256)` (wraps on underflow).
 #[inline]
 fn sub_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     limbs_le_to_be32(&sub_limbs_le_4(be32_to_limbs_le(a), &be32_to_limbs_le(b)))
 }
 
-/// Reduce modulo `n` with a single conditional subtraction.
-///
-/// Sufficient for any 32-byte input: `n > 2^255`, so `2n > 2^256 > x` and one subtraction always
-/// lands below `n`.
+/// Reduce modulo `n` with one conditional subtraction (`n > 2^255` ⇒ sufficient for any 32-byte input).
 #[inline]
 fn mod_reduce_once(x: [u8; 32]) -> [u8; 32] {
     limbs_le_to_be32(&reduce_mod_n_le(be32_to_limbs_le(&x)))
 }
 
-/// Reduce a 32-byte big-endian integer modulo secp256k1 curve order \(n\).
+/// Reduce a 32-byte big-endian integer modulo secp256k1 order `n`.
 pub fn secp256k1_scalar_reduce_be(x: [u8; 32]) -> [u8; 32] {
     mod_reduce_once(x)
 }
@@ -116,9 +97,7 @@ fn is_zero(x: &[u8; 32]) -> bool {
 }
 
 fn get_bit_be(x: &[u8; 32], bit_index: usize) -> u8 {
-    // Bit ordering for a 256-bit **big-endian** integer:
-    // - `bit_index == 0` is the most significant bit (byte 0, bit 7)
-    // - `bit_index == 255` is the least significant bit (byte 31, bit 0)
+    // Big-endian: bit 0 = MSB (byte 0, bit 7); bit 255 = LSB (byte 31, bit 0).
     debug_assert!(bit_index < 256);
     let byte = bit_index / 8;
     let bit = 7 - (bit_index % 8);
@@ -129,9 +108,6 @@ pub fn mul_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     mul_mod_n_barrett(a, b)
 }
 
-/// `mulmod(a, b, Q)` for 256-bit values, where `Q` is secp256k1 order.
-///
-/// This is used to match `mulmod(..., LibSecp256k1.Q())` semantics exactly.
 fn mod_pow(base: &[u8; 32], exponent: &[u8; 32]) -> [u8; 32] {
     let exp = mod_reduce_once(*exponent);
     let base_red = mod_reduce_once(*base);
@@ -158,8 +134,7 @@ fn mod_pow(base: &[u8; 32], exponent: &[u8; 32]) -> [u8; 32] {
     }
 
     if !seen {
-        // `exp == 0` ⇒ x^0 == 1 (mod n)
-        result[31] = 1;
+        result[31] = 1; // x^0 == 1
     }
 
     result
@@ -259,9 +234,8 @@ fn mul_limbs(a: &[u64], b: &[u64], out: &mut [u64]) {
 
 #[inline]
 fn shr_255_from_512(x: &[u64; 8]) -> [u64; 5] {
-    // q1 = floor(x / 2^255)
+    // floor(x / 2^255); shift = 3*64 + 63
     let mut out = [0u64; 5];
-    // shift right by 255 = 3*64 + 63
     let lo = 3usize;
     let shift = 63u32;
     for i in 0..5 {
@@ -274,7 +248,6 @@ fn shr_255_from_512(x: &[u64; 8]) -> [u64; 5] {
 
 #[inline]
 fn take_low_257_bits(x: &[u64; 8]) -> [u64; 5] {
-    // r1 = x mod 2^257 (low 257 bits)
     let mut out = [0u64; 5];
     out[0] = x[0];
     out[1] = x[1];
@@ -286,16 +259,13 @@ fn take_low_257_bits(x: &[u64; 8]) -> [u64; 5] {
 
 #[inline]
 fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
-    // k = 256 bits, modulus < 2^k.
-    // q1 = floor(x / 2^(k-1)) = x >> 255   (<= 257 bits)
+    // Barrett: q1 = x >> 255; q3 = (q1 * μ) >> 257; r = (x - q3*n) mod 2^257; correct.
     let q1 = shr_255_from_512(x);
 
-    // q2 = q1 * mu (<= 514 bits)
     let mut q2 = [0u64; 10];
     mul_limbs(&q1, &SECP256K1_ORDER_BARRETT_MU_LIMBS_LE, &mut q2);
 
-    // q3 = floor(q2 / 2^(k+1)) = q2 >> 257   (<= 257 bits)
-    // shift right by 257 = 4*64 + 1
+    // q3 = q2 >> 257 (= 4*64 + 1)
     let mut q3 = [0u64; 5];
     for i in 0..5 {
         let a = if 4 + i < 10 { q2[4 + i] } else { 0 };
@@ -303,10 +273,8 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
         q3[i] = (a >> 1) | (b << 63);
     }
 
-    // r1 = x mod 2^(k+1)
     let r1 = take_low_257_bits(x);
 
-    // r2 = (q3 * n) mod 2^(k+1)
     let mut q3n = [0u64; 9];
     mul_limbs(&q3, &SECP256K1_ORDER_LIMBS_LE, &mut q3n);
     let mut r2 = [0u64; 5];
@@ -316,7 +284,6 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
     r2[3] = q3n[3];
     r2[4] = q3n[4] & 1;
 
-    // r = (r1 - r2) mod 2^(k+1)
     let mut r = r1;
     let mut borrow: u64 = 0;
     for i in 0..5 {
@@ -325,18 +292,12 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
         r[i] = t2;
         borrow = (b1 as u64) | (b2 as u64);
     }
-    // If underflow, add 2^(k+1) which is a no-op in mod 2^(k+1) arithmetic (already wrapped).
-    // Ensure top limb stays 1-bit.
     r[4] &= 1;
 
-    // Final correction: while r >= n, r -= n. At most 2 iterations for this setup.
     let mut r4 = [r[0], r[1], r[2], r[3]];
-    // If r has the 257th bit set, it's definitely >= n (since n < 2^256).
     if r[4] != 0 {
-        // subtract n once, borrowing from the top bit.
         r4 = sub_limbs_le_4(r4, &SECP256K1_ORDER_LIMBS_LE);
     }
-    // Now r < 2^256, compare as 256-bit.
     if cmp_limbs_le_4(&r4, &SECP256K1_ORDER_LIMBS_LE) != core::cmp::Ordering::Less {
         r4 = sub_limbs_le_4(r4, &SECP256K1_ORDER_LIMBS_LE);
     }
@@ -344,8 +305,6 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
 }
 
 pub fn mul_mod_n_barrett(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    // `reduce_mod_n_le` *is* `mod_reduce_once` in limb space, so reducing once here replaces the
-    // previous reduce-in-bytes-then-reduce-again-in-limbs round trip.
     let a_le = reduce_mod_n_le(be32_to_limbs_le(a));
     let b_le = reduce_mod_n_le(be32_to_limbs_le(b));
     let prod = mul_4x4(&a_le, &b_le);
@@ -384,7 +343,7 @@ pub fn evm_schnorr_ecdsa_inputs(
 
     let sig_red = mod_reduce_once(*signature);
     let msg_mul = mul_mod(&sig_red, &px_mod_n);
-    // `unchecked { msgHash = Q - mulmod(...) }` (no special-case for zero).
+    // Match EVM unchecked { msgHash = Q - mulmod(...) } (no zero special-case).
     let e_ecdsa = sub_be(&SECP256K1_ORDER, &msg_mul);
     let ecdsa_s_mul = mul_mod(&challenge, &px_mod_n);
     let mut s_ecdsa = sub_be(&SECP256K1_ORDER, &ecdsa_s_mul);
@@ -392,10 +351,7 @@ pub fn evm_schnorr_ecdsa_inputs(
         return Err(AttestationError::InvalidSignature);
     }
 
-    // Ethereum `ecrecover` accepts malleable "high-s" signatures, but Solana's
-    // `secp256k1_recover` implementation rejects non-canonical ECDSA `s` values.
-    // Normalize to low-S (`s <= n/2`) and flip the recovery id (0/1), matching
-    // standard ECDSA canonicalization used by secp256k1 libraries.
+    // Solana secp256k1_recover rejects high-s; normalize and flip recovery id.
     let mut recovery_id = recovery_id;
     if cmp_be(&s_ecdsa, &SECP256K1_ORDER_HALF) == core::cmp::Ordering::Greater {
         s_ecdsa = sub_be(&SECP256K1_ORDER, &s_ecdsa);
@@ -403,7 +359,7 @@ pub fn evm_schnorr_ecdsa_inputs(
     }
 
     let mut ecdsa_signature = [0u8; 64];
-    // Pass `r` as the aggregate pubkey X coordinate (`U256`), not `X mod Q`.
+    // r is the aggregate pubkey X (not X mod n).
     ecdsa_signature[..32].copy_from_slice(&px);
     ecdsa_signature[32..].copy_from_slice(&s_ecdsa);
 
@@ -531,7 +487,7 @@ mod tests {
 
     #[test]
     fn mul_mod_matches_crypto_bigint_fixture_vector() {
-        // Aggregated pubkey x (signers 1..3) from `tests/instructions/verify-answer.test.ts` fixture.
+        // Aggregated pubkey x from verify-answer fixture (signers 1..3).
         let px: [u8; 32] = [
             0x34, 0x62, 0x45, 0x12, 0x96, 0x14, 0xb5, 0xb4, 0x4e, 0xca, 0x16, 0x4c, 0x25, 0xc8,
             0x86, 0x01, 0x09, 0xa2, 0xec, 0xac, 0x8c, 0x9a, 0xdf, 0xd9, 0x0d, 0x9d, 0x1d, 0x8f,
@@ -561,14 +517,13 @@ mod tests {
 
     #[test]
     fn evm_schnorr_trick_recovers_commitment_for_verify_answer_fixture_vector() {
-        /// Domain prefix — same constant as `message::MESSAGE_PREFIX`.
         const MESSAGE_PREFIX: [u8; 32] = [
             0xa7, 0x55, 0x23, 0xa2, 0xab, 0x7b, 0x71, 0x8d, 0x9c, 0xff, 0xd2, 0xfa, 0x97, 0xed,
             0x06, 0x9f, 0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22,
             0xf7, 0x0e, 0x7f, 0xe7,
         ];
 
-        // Compressed pubkeys for registered nodes 1..3 from `tests/instructions/verify-answer.test.ts`.
+        // Compressed pubkeys for nodes 1..3 (verify-answer fixture).
         let pk1: [u8; 33] = [
             0x03, 0xc0, 0x95, 0x27, 0xe9, 0x78, 0xf6, 0xea, 0x69, 0xf0, 0xc6, 0xb7, 0xac, 0x0f,
             0xb6, 0x3a, 0xd0, 0x81, 0xa8, 0xa2, 0x91, 0x15, 0x1c, 0x5a, 0x0b, 0x11, 0x5c, 0xce,
@@ -598,11 +553,10 @@ mod tests {
         ];
         let registry_version = 42u32;
         let signatures_required = 3u8;
-        // `verify-answer.test.ts` uses a legacy hash layout (not `_constructMessage`) with
-        // big-endian `uint32` threshold packing.
+        // Legacy verify-answer hash: big-endian u32 threshold (not current message layout).
         let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
 
-        // bitmap integer `7` => nodes {1,2,3} => bits 0..2 set.
+        // Bitmap 7 => bits 0..2 (nodes 1..3).
         let signers_bitmap: [u8; 32] = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

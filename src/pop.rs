@@ -1,4 +1,4 @@
-//! secp256k1 node-key validation and proof-of-possession verification.
+//! Secp256k1 node-key validation and proof-of-possession verification.
 
 use libsecp256k1::{PublicKey, PublicKeyFormat};
 use solana_keccak_hasher::hashv;
@@ -12,26 +12,22 @@ use crate::{
     SignerXy,
 };
 
-/// Domain separator for Molpha node proofs of possession.
+/// Domain separator for node proofs of possession.
 pub const NODE_POP_PREFIX: &[u8] = b"MOLPHA_NODE_POP_V1";
 
-/// Failure to validate a node key and its proof of possession.
+/// Node key / PoP validation failure.
 #[cfg_attr(feature = "thiserror", derive(thiserror::Error))]
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum NodePopError {
-    /// The submitted compressed key is not a canonical, recovery-compatible secp256k1 point.
+    /// Compressed key is not a canonical, recovery-compatible secp256k1 point.
     #[cfg_attr(feature = "thiserror", error("invalid secp256k1 public key"))]
     InvalidPublicKey,
-    /// The submitted Schnorr proof of possession is malformed or does not match the key.
+    /// PoP is malformed or does not match the key.
     #[cfg_attr(feature = "thiserror", error("invalid proof of possession"))]
     InvalidProof,
 }
 
-/// Validate a compressed secp256k1 node key, verify its PoP, and return affine coordinates.
-///
-/// The returned big-endian `(x, y)` coordinates are canonical and suitable for storing as a
-/// [`SignerXy`]. Key parsing and recovery-compatibility validation happen once and the verified
-/// proof reuses those normalized coordinates.
+/// Validate a compressed node key, verify its PoP, and return affine `(x, y)` for [`SignerXy`].
 pub fn validate_key_and_verify_pop(
     program_id: &[u8; 32],
     node_id: &[u8; 32],
@@ -102,8 +98,7 @@ fn verify_pop(
         .to_bytes(),
     );
 
-    // ECDSA recovery with r=P.x recovers Q = r^-1((-e*r)P - (-s*r)G)
-    // = sG - eP = R. Low-S normalization preserves Q by flipping P's recovery parity.
+    // ECDSA recovery with r=P.x yields R = sG - eP; low-S flips recovery parity.
     let ecdsa_hash = negate_mod_n(&mul_mod(pop_sig_s, public_key_x));
     let ecdsa_s = negate_mod_n(&mul_mod(&challenge, public_key_x));
     if ecdsa_s == [0u8; 32] {

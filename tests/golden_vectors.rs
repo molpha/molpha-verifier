@@ -1,19 +1,12 @@
-//! Byte-exact golden vectors for the deterministic selection derivation.
+//! Golden vectors for deterministic selection derivation.
 //!
-//! `derive_group_bitmap` / `derive_selection_bitmap` are consensus-critical: their output must
-//! match the EVM reference implementation bit for bit, forever. The unit tests in `src/bitmap.rs`
-//! pin four hand-checked vectors; this test pins a rolling digest over a wide sweep of
-//! `(seed, node_count, group_size)` so any change to the sampling internals — an optimization, a
-//! refactor — is caught even where no hand-checked vector exists.
-//!
-//! If this test fails, the derivation changed. That is a hard-fork-class change, not a test to
-//! update casually.
+//! Consensus-critical: output must match the EVM reference bit-for-bit. A failure here is a
+//! hard-fork-class change, not a casual test update.
 
 use molpha_verifier::bitmap::derive_group_bitmap;
 use molpha_verifier::selection::derive_selection_bitmap;
 use sha2::{Digest, Sha256};
 
-/// Deterministic pseudo-random seed for sweep index `i` (no RNG dependency).
 fn sweep_seed(i: u32) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"molpha-golden-sweep");

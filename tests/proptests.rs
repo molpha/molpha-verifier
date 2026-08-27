@@ -10,7 +10,7 @@ use molpha_verifier::{
         bitmap_popcount, bitmap_set_bit, bitmap_store, derive_group_bitmap,
         effective_selection_size, for_each_set_bit, validate_bitmap_upper_bits_clear,
     },
-    coalition::{CoalitionAccumulator, public_key_from_affine_xy},
+    coalition::{public_key_from_affine_xy, CoalitionAccumulator},
     message::compute_message_hash,
     payload::{AttestationPayload, SchnorrSignature},
     scalar::{
@@ -204,9 +204,6 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 
-    /// Swept across the full `1..=256` range, not just the first 64-bit limb: the sampler holds
-    /// the bitmap as four `u64` limbs, so limb boundaries (64 / 128 / 192 / 256) are where an
-    /// off-by-one in the mask or the widening would show up.
     #[test]
     fn derive_group_bitmap_popcount_and_range(
         seed in any::<[u8; 32]>(),
@@ -219,7 +216,6 @@ proptest! {
         prop_assert!(bits_in_range(&bitmap, node_count));
     }
 
-    /// Exact limb boundaries, exhaustively rather than by chance.
     #[test]
     fn derive_group_bitmap_at_limb_boundaries(seed in any::<[u8; 32]>()) {
         for node_count in [1u32, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256] {
@@ -290,15 +286,12 @@ proptest! {
         prop_assert_eq!(got, expected);
     }
 
-    /// The 256-bit reduce works in 64-bit limbs; check it against arbitrary-precision `%`.
     #[test]
     fn scalar_reduce_matches_bigint_modulo(x in any::<[u8; 32]>()) {
         let expected = big_to_be32(be32_to_big(&x) % be32_to_big(&SECP256K1_ORDER));
         prop_assert_eq!(secp256k1_scalar_reduce_be(x), expected);
     }
 
-    /// Low-s normalization: `s > n/2` becomes `n - s` (wrapping at 2^256, as the byte-wise
-    /// subtraction did) with the recovery-id parity flipped, and a zero result is rejected.
     #[test]
     fn ecdsa_normalize_low_s_matches_bigint_reference(
         signature in any::<[u8; 64]>(),

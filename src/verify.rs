@@ -1,8 +1,6 @@
-//! High-level attestation verification over caller-supplied signer pubkeys.
+//! Attestation verification over caller-supplied signer pubkeys.
 //!
-//! These functions are pure: the caller resolves the signer pubkeys (e.g. from an on-chain
-//! registry, an off-chain snapshot, or hard-coded constants) and passes them in. No anchor,
-//! no `AccountInfo`, no PDA reads.
+//! Pure: the caller resolves pubkeys and passes them in. No account I/O.
 
 use solana_secp256k1_recover::secp256k1_recover;
 
@@ -17,23 +15,18 @@ use crate::scalar::{
 };
 use crate::selection::derive_selection_bitmap_u256;
 
-/// Stored secp256k1 affine coordinates `(x, y)`, big-endian — as kept in a `Node`.
+/// Secp256k1 affine coordinates `(x, y)`, big-endian.
 pub type SignerXy = ([u8; 32], [u8; 32]);
 
 /// Verify an attestation against caller-supplied signer pubkeys.
 ///
 /// # Caller contract
-/// - `node_count` is the registry node count for `attestation.payload.registry_version`.
-/// - `ordered_signers` holds one `(x, y)` per set bit of `attestation.signature.signers_bitmap`,
-///   in **ascending bit-index order** — the same order as the Molpha program combines pubkeys.
-///   The caller is responsible for resolving the authentic pubkeys; this function trusts the
-///   supplied set.
+/// - `node_count` is the registry size for `attestation.payload.registry_version`.
+/// - `ordered_signers`: one `(x, y)` per set bit of `signers_bitmap`, ascending bit-index order.
+///   This function trusts the supplied set.
 ///
-/// Re-derives the selection bitmap internally and enforces `signers ⊆ selection`. Checks run
-/// cheapest-first: scalar validity → signer threshold → signer-count match → selection subset →
-/// coalition reconstruction → message hash → Schnorr recovery. Every check that ran before still
-/// runs; only the order in which two *simultaneously* failing conditions are reported differs, so
-/// the set of accepted attestations is unchanged.
+/// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
+/// (scalar → threshold → count → selection → coalition → hash → recovery); acceptance is unchanged.
 pub fn verify_attestation(
     attestation: &Attestation,
     node_count: u32,
@@ -62,7 +55,6 @@ where
     let signature = &attestation.signature;
     let payload = &attestation.payload;
 
-    // Subsumes the all-zero case: a zero scalar is not a valid non-zero scalar.
     if !secp256k1_scalar_is_valid_nonzero(&signature.agg_sig_s) {
         return Err(AttestationError::InvalidAggregateSignature);
     }
@@ -73,8 +65,7 @@ where
         return Err(AttestationError::InsufficientSigners);
     }
 
-    // Ahead of selection derivation: a count mismatch is a two-instruction check, while deriving
-    // the selection bitmap costs a keccak round per eight candidate draws.
+    // Cheap count check before keccak-heavy selection derivation.
     if supplied_signers != signer_count as usize {
         return Err(AttestationError::SignerCountMismatch);
     }
@@ -122,9 +113,9 @@ fn accumulate_xy(
     Ok(())
 }
 
-/// Reconstruct the coalition key `Σ X_i` from ordered signer pubkeys → compressed (33 bytes).
+/// Reconstruct coalition key `Σ X_i` as compressed pubkey (33 bytes).
 ///
-/// Errors on an empty signer set or a point-at-infinity sum.
+/// Errors on an empty set or a point-at-infinity sum.
 pub fn reconstruct_coalition_key(
     ordered_signers: &[SignerXy],
 ) -> Result<[u8; 33], AttestationError> {
@@ -136,12 +127,9 @@ pub fn reconstruct_coalition_key(
     coalition.compressed_pubkey()
 }
 
-/// Verify the aggregate Schnorr signature over an arbitrary `message_hash` against the coalition
-/// formed by `ordered_signers`.
+/// Verify an aggregate Schnorr signature over `message_hash` for `ordered_signers`.
 ///
-/// Returns `Ok(true)` when valid (no fraud), `Ok(false)` when invalid (fabricated / committed
-/// garbage → slashable). `Err` only on malformed input (empty signer set, bad curve point). This
-/// mirrors the dispute-path semantics in the Molpha program.
+/// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed input.
 pub fn verify_aggregate_over_hash(
     ordered_signers: &[SignerXy],
     agg_sig_s: &[u8; 32],
@@ -157,8 +145,7 @@ pub fn verify_aggregate_over_hash(
     )
 }
 
-/// Folding-closure form of [`verify_aggregate_over_hash`], for callers that can sum signers
-/// without materializing them.
+/// [`verify_aggregate_over_hash`] with a folding closure over the coalition accumulator.
 pub(crate) fn verify_aggregate_over_hash_core<F>(
     agg_sig_s: &[u8; 32],
     commitment: &[u8; 20],
@@ -186,7 +173,6 @@ where
     ))
 }
 
-/// Run the Schnorr→ECDSA recovery trick and compare the recovered address to `commitment`.
 fn recover_and_match(
     x_coalition: &[u8; 33],
     message_hash: &[u8; 32],
@@ -208,12 +194,12 @@ fn recover_and_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coalition::public_key_from_affine_xy;
     use crate::fixtures::{
         CANONICAL_TIMESTAMP, COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT,
         REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SIGNER_COUNT, SOURCE_ID, VALUE,
     };
     use crate::message::MESSAGE_PREFIX;
-    use crate::coalition::public_key_from_affine_xy;
     use libsecp256k1::PublicKey;
 
     fn fixture_signers_xy() -> Vec<SignerXy> {
@@ -242,7 +228,6 @@ mod tests {
         assert!(popcount >= u32::from(SIGNATURES_REQUIRED));
     }
 
-    /// The coalition-from-pubkeys path must match `PublicKey::combine`.
     #[test]
     fn reconstruct_coalition_key_matches_combine() {
         let signer_pubkeys = fixture_signers_xy();
@@ -273,7 +258,6 @@ mod tests {
         }
     }
 
-    /// Full end-to-end verification with caller-supplied pubkeys — no anchor, no PDAs.
     #[test]
     fn verify_attestation_accepts_fixture() {
         let attestation = fixture_attestation();
@@ -329,7 +313,6 @@ mod tests {
         )
         .unwrap());
 
-        // Tampered hash → invalid (slashable), not an error.
         let mut bad_hash = message_hash;
         bad_hash[0] ^= 0xff;
         assert!(!verify_aggregate_over_hash(
@@ -343,7 +326,6 @@ mod tests {
 
     #[test]
     fn message_prefix_matches_known_constant() {
-        // Guard against accidental edits to the domain-separation prefix.
         assert_eq!(MESSAGE_PREFIX[0], 0xa7);
     }
 }

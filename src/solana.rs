@@ -531,7 +531,7 @@ mod tests {
     fn node_body_matches_declared_account_length() {
         let data = node_account_data(0);
         assert_eq!(data.len(), NODE_ACCOUNT_LEN);
-        assert_eq!(NODE_ACCOUNT_LEN, DISCRIMINATOR_LEN + 160);
+        assert_eq!(NODE_ACCOUNT_LEN, DISCRIMINATOR_LEN + 152);
     }
 
     #[test]

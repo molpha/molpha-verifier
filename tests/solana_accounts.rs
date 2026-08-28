@@ -52,7 +52,7 @@ fn registry_pda(version: u32) -> (Pubkey, u8) {
 }
 
 const NODE_STATUS_OFFSET: usize = DISCRIMINATOR_LEN + 32 + 32 + 32;
-const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 7 * 8;
+const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 6 * 8;
 
 fn fill_node_account(
     data: &mut [u8],

@@ -60,7 +60,7 @@ pub const DISCRIMINATOR_LEN: usize = 8;
 pub const REGISTRY_ACCOUNT_LEN: usize = 8_208;
 
 /// Serialized `Node` account length including discriminator.
-pub const NODE_ACCOUNT_LEN: usize = 160;
+pub const NODE_ACCOUNT_LEN: usize = 152;
 
 // Registry is zero_copy / repr(C): version(u32), node_count(u16), redundancy_buffer(u8), bump(u8),
 // then nodes[[u8;32]; 256]. Header is 8 bytes with no padding.
@@ -78,8 +78,8 @@ const NODE_OWNER_OFFSET: usize = DISCRIMINATOR_LEN;
 const NODE_PUBKEY_X_OFFSET: usize = NODE_OWNER_OFFSET + 32;
 const NODE_PUBKEY_Y_OFFSET: usize = NODE_PUBKEY_X_OFFSET + 32;
 const NODE_STATUS_OFFSET: usize = NODE_PUBKEY_Y_OFFSET + 32;
-// ip(4) + port(2) + six u64 fields + bump(1)
-const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 6 * 8;
+// ip(4) + port(2) + five 8-byte trailing fields + bump(1)
+const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 5 * 8;
 
 const _: () = assert!(NODE_BUMP_OFFSET + 1 == NODE_ACCOUNT_LEN);
 
@@ -531,7 +531,7 @@ mod tests {
     fn node_body_matches_declared_account_length() {
         let data = node_account_data(0);
         assert_eq!(data.len(), NODE_ACCOUNT_LEN);
-        assert_eq!(NODE_ACCOUNT_LEN, DISCRIMINATOR_LEN + 152);
+        assert_eq!(NODE_ACCOUNT_LEN, DISCRIMINATOR_LEN + 144);
     }
 
     #[test]

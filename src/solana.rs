@@ -74,12 +74,12 @@ const REGISTRY_NODES_LEN: usize = MAX_REGISTRY_NODES * 32;
 const _: () = assert!(REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN == REGISTRY_ACCOUNT_LEN);
 
 // Node is Borsh: owner, pubkey_x, pubkey_y, status, then trailing fields through bump.
-const NODE_OWNER_OFFSET: usize = DISCRIMINATOR_LEN;
-const NODE_PUBKEY_X_OFFSET: usize = NODE_OWNER_OFFSET + 32;
-const NODE_PUBKEY_Y_OFFSET: usize = NODE_PUBKEY_X_OFFSET + 32;
-const NODE_STATUS_OFFSET: usize = NODE_PUBKEY_Y_OFFSET + 32;
+pub const NODE_OWNER_OFFSET: usize = DISCRIMINATOR_LEN;
+pub const NODE_PUBKEY_X_OFFSET: usize = NODE_OWNER_OFFSET + 32;
+pub const NODE_PUBKEY_Y_OFFSET: usize = NODE_PUBKEY_X_OFFSET + 32;
+pub const NODE_STATUS_OFFSET: usize = NODE_PUBKEY_Y_OFFSET + 32;
 // ip(4) + port(2) + five 8-byte trailing fields + bump(1)
-const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 5 * 8;
+pub const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 5 * 8;
 
 const _: () = assert!(NODE_BUMP_OFFSET + 1 == NODE_ACCOUNT_LEN);
 

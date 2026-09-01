@@ -8,8 +8,8 @@ use molpha_verifier::fixtures::{
 };
 use molpha_verifier::solana::{
     verify_attestation_accounts, AccountError, RegistryAccount, DISCRIMINATOR_LEN,
-    NODE_ACCOUNT_LEN, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, REGISTRY_ACCOUNT_LEN,
-    REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
+    NODE_ACCOUNT_LEN, NODE_BUMP_OFFSET, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, NODE_STATUS_OFFSET,
+    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
 };
 use molpha_verifier::{Attestation, AttestationPayload, SchnorrSignature};
 
@@ -50,9 +50,6 @@ fn registry_pda(version: u32) -> (Pubkey, u8) {
     )
     .expect("registry PDA")
 }
-
-const NODE_STATUS_OFFSET: usize = DISCRIMINATOR_LEN + 32 + 32 + 32;
-const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 6 * 8;
 
 fn fill_node_account(
     data: &mut [u8],

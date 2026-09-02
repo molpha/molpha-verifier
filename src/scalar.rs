@@ -1,18 +1,14 @@
-//! secp256k1 scalar arithmetic and the EVM Schnorr→ECDSA recovery trick.
-//!
-//! Pure, anchor-free. Moved verbatim from the Molpha program's `utils/schnorr.rs`
-//! (`MolphaError` → [`DataUpdateError`]).
+//! Secp256k1 scalar arithmetic and the Schnorr→ECDSA recovery trick.
 
 use solana_keccak_hasher::hashv;
 
-use crate::error::DataUpdateError;
+use crate::error::AttestationError;
 
 const SECP256K1_ORDER: [u8; 32] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
 ];
 
-/// secp256k1 curve order / 2 (rounded down).
 const SECP256K1_ORDER_HALF: [u8; 32] = [
     0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
@@ -23,7 +19,7 @@ const SECP256K1_ORDER_MINUS_TWO: [u8; 32] = [
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x3F,
 ];
 
-// secp256k1 curve order n, little-endian u64 limbs (least significant limb first).
+// Curve order n as little-endian u64 limbs.
 const SECP256K1_ORDER_LIMBS_LE: [u64; 4] = [
     0xBFD25E8CD0364141,
     0xBAAEDCE6AF48A03B,
@@ -31,11 +27,7 @@ const SECP256K1_ORDER_LIMBS_LE: [u64; 4] = [
     0xFFFFFFFFFFFFFFFF,
 ];
 
-// mu = floor(2^512 / n), little-endian u64 limbs.
-//
-// Derived from:
-//   n  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-//   mu = floor(2^512 / n)
+// Barrett μ = floor(2^512 / n), little-endian u64 limbs.
 const SECP256K1_ORDER_BARRETT_MU_LIMBS_LE: [u64; 5] = [
     0x402DA1732FC9BEC0,
     0x4551231950B75FC4,
@@ -44,30 +36,29 @@ const SECP256K1_ORDER_BARRETT_MU_LIMBS_LE: [u64; 5] = [
     0x0000000000000001,
 ];
 
+#[inline]
 fn cmp_be(a: &[u8; 32], b: &[u8; 32]) -> core::cmp::Ordering {
-    for i in 0..32 {
-        if a[i] < b[i] {
-            return core::cmp::Ordering::Less;
-        }
-        if a[i] > b[i] {
-            return core::cmp::Ordering::Greater;
-        }
-    }
-    core::cmp::Ordering::Equal
+    cmp_limbs_le_4(&be32_to_limbs_le(a), &be32_to_limbs_le(b))
 }
 
 pub fn secp256k1_scalar_is_valid_nonzero(x: &[u8; 32]) -> bool {
     !is_zero(x) && cmp_be(x, &SECP256K1_ORDER) == core::cmp::Ordering::Less
 }
 
-/// Normalize an ECDSA signature to "low-s" form.
-///
-/// Some secp256k1 recovery implementations reject high-s signatures.
-/// If `s > n/2`, converts `(r, s)` to `(r, n-s)` and flips `recovery_id` parity bit.
+/// `-value mod n` for a canonical secp256k1 scalar.
+pub(crate) fn negate_mod_n(value: &[u8; 32]) -> [u8; 32] {
+    if is_zero(value) {
+        [0u8; 32]
+    } else {
+        sub_be(&SECP256K1_ORDER, value)
+    }
+}
+
+/// Normalize ECDSA `s` to low-s form (`s <= n/2`), flipping `recovery_id` parity if needed.
 pub fn secp256k1_ecdsa_normalize_low_s(
     mut recovery_id: u8,
     signature_64: &mut [u8; 64],
-) -> Result<u8, DataUpdateError> {
+) -> Result<u8, AttestationError> {
     let mut s = [0u8; 32];
     s.copy_from_slice(&signature_64[32..64]);
 
@@ -77,41 +68,26 @@ pub fn secp256k1_ecdsa_normalize_low_s(
         recovery_id ^= 1;
     }
 
-    // Ensure non-zero `s` after normalization.
     if signature_64[32..64].iter().all(|b| *b == 0) {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     Ok(recovery_id)
 }
 
-fn sub_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut borrow = 0i16;
-    for i in (0..32).rev() {
-        let diff = a[i] as i16 - b[i] as i16 - borrow;
-        if diff < 0 {
-            out[i] = (diff + 256) as u8;
-            borrow = 1;
-        } else {
-            out[i] = diff as u8;
-            borrow = 0;
-        }
-    }
-    out
-}
-
+/// `a - b (mod 2^256)` (wraps on underflow).
 #[inline]
-fn mod_reduce_once(mut x: [u8; 32]) -> [u8; 32] {
-    if cmp_be(&x, &SECP256K1_ORDER) != core::cmp::Ordering::Less {
-        x = sub_be(&x, &SECP256K1_ORDER);
-    }
-    x
+fn sub_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    limbs_le_to_be32(&sub_limbs_le_4(be32_to_limbs_le(a), &be32_to_limbs_le(b)))
 }
 
-/// Reduce a 32-byte big-endian integer modulo secp256k1 curve order \(n\).
-///
-/// This is used to port EVM `uint256(...) % Q()` semantics for challenges.
+/// Reduce modulo `n` with one conditional subtraction (`n > 2^255` ⇒ sufficient for any 32-byte input).
+#[inline]
+fn mod_reduce_once(x: [u8; 32]) -> [u8; 32] {
+    limbs_le_to_be32(&reduce_mod_n_le(be32_to_limbs_le(&x)))
+}
+
+/// Reduce a 32-byte big-endian integer modulo secp256k1 order `n`.
 pub fn secp256k1_scalar_reduce_be(x: [u8; 32]) -> [u8; 32] {
     mod_reduce_once(x)
 }
@@ -121,9 +97,7 @@ fn is_zero(x: &[u8; 32]) -> bool {
 }
 
 fn get_bit_be(x: &[u8; 32], bit_index: usize) -> u8 {
-    // Bit ordering for a 256-bit **big-endian** integer as used by EVM `uint256`:
-    // - `bit_index == 0` is the most significant bit (byte 0, bit 7)
-    // - `bit_index == 255` is the least significant bit (byte 31, bit 0)
+    // Big-endian: bit 0 = MSB (byte 0, bit 7); bit 255 = LSB (byte 31, bit 0).
     debug_assert!(bit_index < 256);
     let byte = bit_index / 8;
     let bit = 7 - (bit_index % 8);
@@ -134,9 +108,6 @@ pub fn mul_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     mul_mod_n_barrett(a, b)
 }
 
-/// EVM/Solidity `mulmod(a, b, Q)` for 256-bit values, where `Q` is secp256k1 order.
-///
-/// This is used to match `mulmod(..., LibSecp256k1.Q())` semantics exactly.
 fn mod_pow(base: &[u8; 32], exponent: &[u8; 32]) -> [u8; 32] {
     let exp = mod_reduce_once(*exponent);
     let base_red = mod_reduce_once(*base);
@@ -163,8 +134,7 @@ fn mod_pow(base: &[u8; 32], exponent: &[u8; 32]) -> [u8; 32] {
     }
 
     if !seen {
-        // `exp == 0` ⇒ x^0 == 1 (mod n)
-        result[31] = 1;
+        result[31] = 1; // x^0 == 1
     }
 
     result
@@ -264,9 +234,8 @@ fn mul_limbs(a: &[u64], b: &[u64], out: &mut [u64]) {
 
 #[inline]
 fn shr_255_from_512(x: &[u64; 8]) -> [u64; 5] {
-    // q1 = floor(x / 2^255)
+    // floor(x / 2^255); shift = 3*64 + 63
     let mut out = [0u64; 5];
-    // shift right by 255 = 3*64 + 63
     let lo = 3usize;
     let shift = 63u32;
     for i in 0..5 {
@@ -277,30 +246,55 @@ fn shr_255_from_512(x: &[u64; 8]) -> [u64; 5] {
     out
 }
 
+/// `n` widened to five limbs, for the final reduction of a 258-bit intermediate.
+const SECP256K1_ORDER_LIMBS_LE_5: [u64; 5] = [
+    SECP256K1_ORDER_LIMBS_LE[0],
+    SECP256K1_ORDER_LIMBS_LE[1],
+    SECP256K1_ORDER_LIMBS_LE[2],
+    SECP256K1_ORDER_LIMBS_LE[3],
+    0,
+];
+
 #[inline]
-fn take_low_257_bits(x: &[u64; 8]) -> [u64; 5] {
-    // r1 = x mod 2^257 (low 257 bits)
-    let mut out = [0u64; 5];
-    out[0] = x[0];
-    out[1] = x[1];
-    out[2] = x[2];
-    out[3] = x[3];
-    out[4] = x[4] & 1;
-    out
+fn cmp_limbs_le_5(a: &[u64; 5], b: &[u64; 5]) -> core::cmp::Ordering {
+    for i in (0..5).rev() {
+        if a[i] < b[i] {
+            return core::cmp::Ordering::Less;
+        }
+        if a[i] > b[i] {
+            return core::cmp::Ordering::Greater;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+#[inline]
+fn sub_limbs_le_5(mut a: [u64; 5], b: &[u64; 5]) -> [u64; 5] {
+    let mut borrow: u64 = 0;
+    for i in 0..5 {
+        let (r1, b1) = a[i].overflowing_sub(b[i]);
+        let (r2, b2) = r1.overflowing_sub(borrow);
+        a[i] = r2;
+        borrow = (b1 as u64) | (b2 as u64);
+    }
+    a
 }
 
 #[inline]
 fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
-    // k = 256 bits, modulus < 2^k.
-    // q1 = floor(x / 2^(k-1)) = x >> 255   (<= 257 bits)
+    // Barrett: q1 = x >> 255; q3 = (q1 * μ) >> 257; r = x - q3*n; correct.
+    //
+    // q3 under-estimates floor(x/n) by up to 2, so the raw remainder can reach 3n - 1. That
+    // needs 258 bits — wider than n — so the intermediate is carried at the full 5-limb width
+    // and folded down by the (at most two) subtractions the error bound implies. Truncating it
+    // to 257 bits instead silently returned a wrong residue for the ~1-in-13k products whose
+    // remainder reached 2^257.
     let q1 = shr_255_from_512(x);
 
-    // q2 = q1 * mu (<= 514 bits)
     let mut q2 = [0u64; 10];
     mul_limbs(&q1, &SECP256K1_ORDER_BARRETT_MU_LIMBS_LE, &mut q2);
 
-    // q3 = floor(q2 / 2^(k+1)) = q2 >> 257   (<= 257 bits)
-    // shift right by 257 = 4*64 + 1
+    // q3 = q2 >> 257 (= 4*64 + 1)
     let mut q3 = [0u64; 5];
     for i in 0..5 {
         let a = if 4 + i < 10 { q2[4 + i] } else { 0 };
@@ -308,49 +302,29 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
         q3[i] = (a >> 1) | (b << 63);
     }
 
-    // r1 = x mod 2^(k+1)
-    let r1 = take_low_257_bits(x);
-
-    // r2 = (q3 * n) mod 2^(k+1)
     let mut q3n = [0u64; 9];
     mul_limbs(&q3, &SECP256K1_ORDER_LIMBS_LE, &mut q3n);
-    let mut r2 = [0u64; 5];
-    r2[0] = q3n[0];
-    r2[1] = q3n[1];
-    r2[2] = q3n[2];
-    r2[3] = q3n[3];
-    r2[4] = q3n[4] & 1;
 
-    // r = (r1 - r2) mod 2^(k+1)
-    let mut r = r1;
-    let mut borrow: u64 = 0;
-    for i in 0..5 {
-        let (t1, b1) = r[i].overflowing_sub(r2[i]);
-        let (t2, b2) = t1.overflowing_sub(borrow);
-        r[i] = t2;
-        borrow = (b1 as u64) | (b2 as u64);
-    }
-    // If underflow, add 2^(k+1) which is a no-op in mod 2^(k+1) arithmetic (already wrapped).
-    // Ensure top limb stays 1-bit.
-    r[4] &= 1;
+    // x - q3*n is exact in 320 bits: it is non-negative and strictly below 3n < 2^258, so the
+    // limbs above the fifth cancel and can be dropped.
+    let r1 = [x[0], x[1], x[2], x[3], x[4]];
+    let r2 = [q3n[0], q3n[1], q3n[2], q3n[3], q3n[4]];
+    let mut r = sub_limbs_le_5(r1, &r2);
 
-    // Final correction: while r >= n, r -= n. At most 2 iterations for this setup.
-    let mut r4 = [r[0], r[1], r[2], r[3]];
-    // If r has the 257th bit set, it's definitely >= n (since n < 2^256).
-    if r[4] != 0 {
-        // subtract n once, borrowing from the top bit.
-        r4 = sub_limbs_le_4(r4, &SECP256K1_ORDER_LIMBS_LE);
+    for _ in 0..2 {
+        if cmp_limbs_le_5(&r, &SECP256K1_ORDER_LIMBS_LE_5) == core::cmp::Ordering::Less {
+            break;
+        }
+        r = sub_limbs_le_5(r, &SECP256K1_ORDER_LIMBS_LE_5);
     }
-    // Now r < 2^256, compare as 256-bit.
-    if cmp_limbs_le_4(&r4, &SECP256K1_ORDER_LIMBS_LE) != core::cmp::Ordering::Less {
-        r4 = sub_limbs_le_4(r4, &SECP256K1_ORDER_LIMBS_LE);
-    }
-    r4
+    debug_assert!(cmp_limbs_le_5(&r, &SECP256K1_ORDER_LIMBS_LE_5) == core::cmp::Ordering::Less);
+
+    [r[0], r[1], r[2], r[3]]
 }
 
 pub fn mul_mod_n_barrett(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let a_le = reduce_mod_n_le(be32_to_limbs_le(&mod_reduce_once(*a)));
-    let b_le = reduce_mod_n_le(be32_to_limbs_le(&mod_reduce_once(*b)));
+    let a_le = reduce_mod_n_le(be32_to_limbs_le(a));
+    let b_le = reduce_mod_n_le(be32_to_limbs_le(b));
     let prod = mul_4x4(&a_le, &b_le);
     let r_le = barrett_reduce_mod_n(&prod);
     limbs_le_to_be32(&r_le)
@@ -361,10 +335,10 @@ pub fn evm_schnorr_ecdsa_inputs(
     msg_hash: &[u8; 32],
     signature: &[u8; 32],
     commitment: &[u8; 20],
-) -> core::result::Result<(u8, [u8; 64], [u8; 32]), DataUpdateError> {
+) -> core::result::Result<(u8, [u8; 64], [u8; 32]), AttestationError> {
     let parity_prefix = pubkey_compressed[0];
     if parity_prefix != 0x02 && parity_prefix != 0x03 {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     let recovery_id = parity_prefix & 1;
@@ -373,7 +347,7 @@ pub fn evm_schnorr_ecdsa_inputs(
     px.copy_from_slice(&pubkey_compressed[1..]);
     let px_mod_n = mod_reduce_once(px);
     if is_zero(&px_mod_n) {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
     let challenge_hash = hashv(&[
@@ -387,18 +361,15 @@ pub fn evm_schnorr_ecdsa_inputs(
 
     let sig_red = mod_reduce_once(*signature);
     let msg_mul = mul_mod(&sig_red, &px_mod_n);
-    // Solidity `unchecked { msgHash = Q - mulmod(...) }` (no special-case for zero).
+    // Match EVM unchecked { msgHash = Q - mulmod(...) } (no zero special-case).
     let e_ecdsa = sub_be(&SECP256K1_ORDER, &msg_mul);
     let ecdsa_s_mul = mul_mod(&challenge, &px_mod_n);
     let mut s_ecdsa = sub_be(&SECP256K1_ORDER, &ecdsa_s_mul);
     if is_zero(&s_ecdsa) {
-        return Err(DataUpdateError::InvalidSignature);
+        return Err(AttestationError::InvalidSignature);
     }
 
-    // Ethereum `ecrecover` accepts malleable "high-s" signatures, but Solana's
-    // `secp256k1_recover` implementation rejects non-canonical ECDSA `s` values.
-    // Normalize to low-S (`s <= n/2`) and flip the recovery id (0/1), matching
-    // standard ECDSA canonicalization used by secp256k1 libraries.
+    // Solana secp256k1_recover rejects high-s; normalize and flip recovery id.
     let mut recovery_id = recovery_id;
     if cmp_be(&s_ecdsa, &SECP256K1_ORDER_HALF) == core::cmp::Ordering::Greater {
         s_ecdsa = sub_be(&SECP256K1_ORDER, &s_ecdsa);
@@ -406,7 +377,7 @@ pub fn evm_schnorr_ecdsa_inputs(
     }
 
     let mut ecdsa_signature = [0u8; 64];
-    // Solidity passes `r` as the aggregate pubkey X coordinate (`uint256`), not `X mod Q`.
+    // r is the aggregate pubkey X (not X mod n).
     ecdsa_signature[..32].copy_from_slice(&px);
     ecdsa_signature[32..].copy_from_slice(&s_ecdsa);
 
@@ -532,9 +503,72 @@ mod tests {
         }
     }
 
+    /// Regression: Barrett's `q3` can under-estimate the quotient by 2, leaving a raw remainder
+    /// in `[2n, 3n)` — up to 258 bits. The reduction used to truncate that intermediate to 257
+    /// bits, so these operands (a node key whose x-coordinate sits near the top of the range,
+    /// against a PoP `s`) reduced to the wrong residue and failed an otherwise valid proof.
+    #[test]
+    fn mul_mod_reduces_product_whose_barrett_remainder_needs_258_bits() {
+        let px: [u8; 32] = [
+            0xff, 0xdc, 0x6b, 0xac, 0x17, 0xdb, 0xb7, 0xc5, 0x32, 0x54, 0x97, 0xe4, 0x7e, 0xb4,
+            0x58, 0x83, 0xd6, 0xea, 0x83, 0x2e, 0xa5, 0xa2, 0x6e, 0x30, 0x6b, 0x79, 0xa5, 0xe7,
+            0xb4, 0xa3, 0x92, 0x15,
+        ];
+        let s: [u8; 32] = [
+            0xf5, 0x76, 0x51, 0x9d, 0x0b, 0x91, 0xa5, 0x1a, 0x47, 0x00, 0x8e, 0x45, 0xf7, 0xa8,
+            0xdc, 0x12, 0x3c, 0x5f, 0xec, 0x46, 0xeb, 0xa5, 0x54, 0x20, 0x89, 0x99, 0xb1, 0x4d,
+            0x19, 0x3c, 0x4b, 0x7c,
+        ];
+
+        // Raw remainder here is ~2.058n, i.e. above 2^257.
+        assert_eq!(mul_mod(&s, &px), mul_mod_bigint(&s, &px));
+    }
+
+    /// The failure is rare for uniform operands (~1 in 16k) but an order of magnitude denser
+    /// when a factor sits near `n`, because that is what pushes the raw remainder past `2n`.
+    /// Sweep both, deterministically, so a regression cannot hide behind a lucky seed.
+    #[test]
+    fn mul_mod_matches_bigint_over_uniform_and_near_order_operands() {
+        let mut checked = 0u32;
+        for i in 0u32..40_000 {
+            let mut a = hashv(&[b"mul-mod-sweep-a", &i.to_be_bytes()]).to_bytes();
+            let b = hashv(&[b"mul-mod-sweep-b", &i.to_be_bytes()]).to_bytes();
+
+            // Half uniform, half with the top byte forced high (operand just under n).
+            if i % 2 == 0 {
+                a[0] = 0xff;
+            }
+
+            assert_eq!(
+                mul_mod(&a, &b),
+                mul_mod_bigint(&a, &b),
+                "mul_mod disagrees with bigint at i={i}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 40_000);
+    }
+
+    /// Every reduction must land strictly inside `[0, n)`, including the ones that need two
+    /// corrective subtractions.
+    #[test]
+    fn mul_mod_output_is_always_canonical() {
+        for i in 0u32..20_000 {
+            let mut a = hashv(&[b"canonical-a", &i.to_be_bytes()]).to_bytes();
+            let mut b = hashv(&[b"canonical-b", &i.to_be_bytes()]).to_bytes();
+            a[0] = 0xff;
+            b[0] = 0xff;
+            let out = mul_mod(&a, &b);
+            assert!(
+                cmp_be(&out, &SECP256K1_ORDER) == core::cmp::Ordering::Less,
+                "mul_mod returned a non-canonical scalar at i={i}"
+            );
+        }
+    }
+
     #[test]
     fn mul_mod_matches_crypto_bigint_fixture_vector() {
-        // Aggregated pubkey x (signers 1..3) from `tests/instructions/verify-answer.test.ts` fixture.
+        // Aggregated pubkey x from verify-answer fixture (signers 1..3).
         let px: [u8; 32] = [
             0x34, 0x62, 0x45, 0x12, 0x96, 0x14, 0xb5, 0xb4, 0x4e, 0xca, 0x16, 0x4c, 0x25, 0xc8,
             0x86, 0x01, 0x09, 0xa2, 0xec, 0xac, 0x8c, 0x9a, 0xdf, 0xd9, 0x0d, 0x9d, 0x1d, 0x8f,
@@ -564,14 +598,13 @@ mod tests {
 
     #[test]
     fn evm_schnorr_trick_recovers_commitment_for_verify_answer_fixture_vector() {
-        /// Must match `crates/molpha-verifier/src/message.rs`.
         const MESSAGE_PREFIX: [u8; 32] = [
             0xa7, 0x55, 0x23, 0xa2, 0xab, 0x7b, 0x71, 0x8d, 0x9c, 0xff, 0xd2, 0xfa, 0x97, 0xed,
             0x06, 0x9f, 0xc1, 0x21, 0x84, 0xea, 0xbe, 0xe7, 0xd5, 0x07, 0x85, 0x4d, 0x09, 0x22,
             0xf7, 0x0e, 0x7f, 0xe7,
         ];
 
-        // Compressed pubkeys for registered nodes 1..3 from `tests/instructions/verify-answer.test.ts`.
+        // Compressed pubkeys for nodes 1..3 (verify-answer fixture).
         let pk1: [u8; 33] = [
             0x03, 0xc0, 0x95, 0x27, 0xe9, 0x78, 0xf6, 0xea, 0x69, 0xf0, 0xc6, 0xb7, 0xac, 0x0f,
             0xb6, 0x3a, 0xd0, 0x81, 0xa8, 0xa2, 0x91, 0x15, 0x1c, 0x5a, 0x0b, 0x11, 0x5c, 0xce,
@@ -594,15 +627,17 @@ mod tests {
         let coalition = PublicKey::combine(&[p1, p2, p3]).expect("combine");
         let coalition_compressed = coalition.serialize_compressed();
 
-        let feed_id: [u8; 32] = [
+        let source_id: [u8; 32] = [
             0x6a, 0x6f, 0x62, 0x2d, 0x65, 0x78, 0x74, 0x72, 0x61, 0x63, 0x74, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
         ];
         let registry_version = 42u32;
-        let signatures_required = 3u32;
+        let signatures_required = 3u8;
+        // Legacy verify-answer hash: big-endian u32 threshold (not current message layout).
+        let signatures_required_bytes = u32::from(signatures_required).to_be_bytes();
 
-        // EVM bitmap integer `7` => nodes {1,2,3} => bits 0..2 set in EVM uint256 layout.
+        // Bitmap 7 => bits 0..2 (nodes 1..3).
         let signers_bitmap: [u8; 32] = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -617,9 +652,9 @@ mod tests {
 
         let message_hash = hashv(&[
             MESSAGE_PREFIX.as_slice(),
-            feed_id.as_slice(),
+            source_id.as_slice(),
             registry_version.to_be_bytes().as_slice(),
-            signatures_required.to_be_bytes().as_slice(),
+            signatures_required_bytes.as_slice(),
             signers_bitmap.as_slice(),
             value_bytes32.as_slice(),
             timestamp.to_be_bytes().as_slice(),

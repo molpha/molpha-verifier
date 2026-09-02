@@ -1,14 +1,18 @@
 [package]
 name = "molpha-verifier"
-version = "0.2.1"
+version = "0.3.0"
 description = "Solana program library for verifying Molpha threshold-signed oracle updates"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/Molpha/molpha-verifier"
+repository = "https://github.com/molpha/molpha-verifier"
 homepage = "https://molpha.io"
 keywords = ["schnorr", "secp256k1", "oracle", "solana", "cryptography"]
 categories = ["cryptography"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "molpha_verifier"
@@ -16,18 +20,32 @@ name = "molpha_verifier"
 [features]
 default = []
 borsh = ["dep:borsh"]
+fixtures = []
+thiserror = ["dep:thiserror"]
+# Account adapters: verify straight from `&AccountInfo` (registry + node accounts).
+solana = [
+    "dep:solana-account-info",
+    "dep:solana-program-error",
+    "dep:solana-pubkey",
+    "borsh",
+]
 
 [dependencies]
 solana-keccak-hasher = { version = "3.1.0", features = ["sha3"] }
 solana-secp256k1-recover = "3.1.1"
 libsecp256k1 = { version = "0.6.0", default-features = false }
 ethnum = { version = "1.5", default-features = false }
-borsh = { version = "0.10.3", optional = true }
+borsh = { version = "1.7.0", features = ["derive"], optional = true }
+thiserror = { version = "2.0", optional = true }
+solana-account-info = { version = "3.1.1", optional = true }
+solana-program-error = { version = "3.0.1", optional = true }
+solana-pubkey = { version = "3.0.0", features = ["curve25519"], optional = true }
 
 [dev-dependencies]
 num-bigint = "0.4.6"
 proptest = "1.6"
+sha2 = "0.10"
 
 [[example]]
-name = "verify_data_update"
-required-features = ["borsh"]
+name = "verify_attestation"
+required-features = ["borsh", "fixtures"]

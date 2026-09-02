@@ -1,17 +1,26 @@
-//! Molpha DataUpdate aggregate-Schnorr verification.
+//! Molpha attestation aggregate-Schnorr verification.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //!
-//! A framework-agnostic library (no Anchor / Pinocchio dependency): the downstream program owns the
-//! registry account types and reads them, then passes plain data in. Verify a Molpha [`DataUpdate`]
-//! either from already-resolved signer pubkeys ([`verify_data_update`]) or from parsed registry
-//! entries plus a [`RegistryView`] ([`verify_data_update_resolved`]).
+//! Framework-agnostic: the caller owns registry account types and passes plain data.
+//! Verify via [`verify_attestation`] (resolved pubkeys) or [`verify_attestation_resolved`]
+//! ([`RegistryView`] + [`NodeEntry`]s). [`resolve_registry_signers`] binds each set bit of the
+//! signers bitmap to `nodes[bit]`.
+//!
+//! With the `solana` feature, [`solana`] accepts `&AccountInfo` and performs owner /
+//! discriminator / length checks before verifying.
 //!
 //! # Usage
 //! ```ignore
-//! use molpha_verifier::{verify_data_update, DataUpdate};
+//! use molpha_verifier::{verify_attestation, Attestation};
 //!
-//! // `ordered_signers` are the signing nodes' (x, y) pubkeys in ascending signers_bitmap bit order.
-//! verify_data_update(&payload, node_count, redundancy_buffer, &ordered_signers)?;
+//! // `ordered_signers`: (x, y) pubkeys in ascending signers_bitmap bit order.
+//! verify_attestation(&attestation, node_count, redundancy_buffer, &ordered_signers)?;
 //! ```
+
+#[doc(hidden)]
+#[cfg(any(test, feature = "fixtures"))]
+#[path = "../tests/fixtures/mod.rs"]
+pub mod fixtures;
 
 pub mod bitmap;
 pub mod coalition;
@@ -19,23 +28,27 @@ pub mod error;
 pub mod message;
 pub mod onchain;
 pub mod payload;
+pub mod pop;
 pub mod scalar;
 pub mod selection;
+#[cfg(feature = "solana")]
+#[cfg_attr(docsrs, doc(cfg(feature = "solana")))]
+pub mod solana;
 pub mod state;
 pub mod verify;
 
-pub use error::DataUpdateError;
+pub use error::AttestationError;
 pub use onchain::*;
-pub use payload::DataUpdate;
+pub use payload::Attestation;
+pub use payload::AttestationPayload;
+pub use payload::SchnorrSignature;
+pub use pop::{validate_key_and_verify_pop, NodePopError, NODE_POP_PREFIX};
 pub use state::*;
 
-// High-level verification API.
 pub use verify::{
-    reconstruct_coalition_key, reconstruct_coalition_key_compressed, verify_aggregate_over_hash,
-    verify_data_update, verify_data_update_compressed, SignerXy,
+    reconstruct_coalition_key, verify_aggregate_over_hash, verify_attestation, SignerXy,
 };
 
-// Primitives commonly composed by on-chain callers.
 pub use bitmap::{
     bitmap_is_subset_u256, bitmap_load, derive_group_bitmap, effective_selection_size,
     for_each_set_bit_u256,

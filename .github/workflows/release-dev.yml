@@ -1,0 +1,111 @@
+name: Release (dev)
+
+on:
+  push:
+    branches:
+      - dev
+
+concurrency: release-dev-${{ github.ref }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  CRATES_IO_USER_AGENT: molpha-verifier-ci (https://github.com/molpha/molpha-verifier)
+
+jobs:
+  publish:
+    name: Publish dev prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync baseline from main
+        # Release commits that bump Cargo.toml only land on `main`. Without this step,
+        # `dev` stays anchored to a stale version and republishes already-released code
+        # under a new dev prerelease tag.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Skip if no changes ahead of main
+        id: changes
+        run: |
+          if git diff --quiet origin/main..HEAD -- . ':!.github' ':!Cargo.lock'; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No changes ahead of main; skipping dev publish."
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        if: steps.changes.outputs.has_changes == 'true'
+        run: cargo test --all-features
+
+      - name: Ensure a stable release exists
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          crate=molpha-verifier
+          # max_version can be a prerelease (e.g. 0.3.0-dev.0); use max_stable_version.
+          max_stable_version=$(
+            curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
+              "https://crates.io/api/v1/crates/${crate}" \
+              | jq -r '.crate.max_stable_version // empty'
+          )
+          if [ -z "$max_stable_version" ] || [[ "$max_stable_version" == *-* ]]; then
+            echo "::error::No stable release on crates.io yet (found: '${max_stable_version:-none}'). Publish a release from 'main' before publishing dev prereleases."
+            exit 1
+          fi
+
+      - name: Compute dev version
+        if: steps.changes.outputs.has_changes == 'true'
+        id: dev_version
+        run: |
+          crate=molpha-verifier
+          base=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2 | sed 's/-.*//')
+
+          versions=$(
+            curl -sf -H "User-Agent: ${CRATES_IO_USER_AGENT}" \
+              "https://crates.io/api/v1/crates/${crate}/versions?per_page=100" \
+              | jq -r '.versions[].num'
+          )
+
+          max_dev=-1
+          for version in $versions; do
+            if [[ "$version" =~ ^${base}-dev\.([0-9]+)$ ]]; then
+              n="${BASH_REMATCH[1]}"
+              if [ "$n" -gt "$max_dev" ]; then
+                max_dev=$n
+              fi
+            fi
+          done
+
+          echo "value=${base}-dev.$((max_dev + 1))" >> "$GITHUB_OUTPUT"
+
+      - name: Set dev version in Cargo.toml
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          version="${{ steps.dev_version.outputs.value }}"
+          sed -i "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
+
+      - name: Publish dev prerelease to crates.io
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          cargo generate-lockfile
+          cargo publish --locked --allow-dirty

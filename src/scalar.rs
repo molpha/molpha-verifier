@@ -246,20 +246,49 @@ fn shr_255_from_512(x: &[u64; 8]) -> [u64; 5] {
     out
 }
 
+/// `n` widened to five limbs, for the final reduction of a 258-bit intermediate.
+const SECP256K1_ORDER_LIMBS_LE_5: [u64; 5] = [
+    SECP256K1_ORDER_LIMBS_LE[0],
+    SECP256K1_ORDER_LIMBS_LE[1],
+    SECP256K1_ORDER_LIMBS_LE[2],
+    SECP256K1_ORDER_LIMBS_LE[3],
+    0,
+];
+
 #[inline]
-fn take_low_257_bits(x: &[u64; 8]) -> [u64; 5] {
-    let mut out = [0u64; 5];
-    out[0] = x[0];
-    out[1] = x[1];
-    out[2] = x[2];
-    out[3] = x[3];
-    out[4] = x[4] & 1;
-    out
+fn cmp_limbs_le_5(a: &[u64; 5], b: &[u64; 5]) -> core::cmp::Ordering {
+    for i in (0..5).rev() {
+        if a[i] < b[i] {
+            return core::cmp::Ordering::Less;
+        }
+        if a[i] > b[i] {
+            return core::cmp::Ordering::Greater;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+#[inline]
+fn sub_limbs_le_5(mut a: [u64; 5], b: &[u64; 5]) -> [u64; 5] {
+    let mut borrow: u64 = 0;
+    for i in 0..5 {
+        let (r1, b1) = a[i].overflowing_sub(b[i]);
+        let (r2, b2) = r1.overflowing_sub(borrow);
+        a[i] = r2;
+        borrow = (b1 as u64) | (b2 as u64);
+    }
+    a
 }
 
 #[inline]
 fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
-    // Barrett: q1 = x >> 255; q3 = (q1 * μ) >> 257; r = (x - q3*n) mod 2^257; correct.
+    // Barrett: q1 = x >> 255; q3 = (q1 * μ) >> 257; r = x - q3*n; correct.
+    //
+    // q3 under-estimates floor(x/n) by up to 2, so the raw remainder can reach 3n - 1. That
+    // needs 258 bits — wider than n — so the intermediate is carried at the full 5-limb width
+    // and folded down by the (at most two) subtractions the error bound implies. Truncating it
+    // to 257 bits instead silently returned a wrong residue for the ~1-in-13k products whose
+    // remainder reached 2^257.
     let q1 = shr_255_from_512(x);
 
     let mut q2 = [0u64; 10];
@@ -273,35 +302,24 @@ fn barrett_reduce_mod_n(x: &[u64; 8]) -> [u64; 4] {
         q3[i] = (a >> 1) | (b << 63);
     }
 
-    let r1 = take_low_257_bits(x);
-
     let mut q3n = [0u64; 9];
     mul_limbs(&q3, &SECP256K1_ORDER_LIMBS_LE, &mut q3n);
-    let mut r2 = [0u64; 5];
-    r2[0] = q3n[0];
-    r2[1] = q3n[1];
-    r2[2] = q3n[2];
-    r2[3] = q3n[3];
-    r2[4] = q3n[4] & 1;
 
-    let mut r = r1;
-    let mut borrow: u64 = 0;
-    for i in 0..5 {
-        let (t1, b1) = r[i].overflowing_sub(r2[i]);
-        let (t2, b2) = t1.overflowing_sub(borrow);
-        r[i] = t2;
-        borrow = (b1 as u64) | (b2 as u64);
-    }
-    r[4] &= 1;
+    // x - q3*n is exact in 320 bits: it is non-negative and strictly below 3n < 2^258, so the
+    // limbs above the fifth cancel and can be dropped.
+    let r1 = [x[0], x[1], x[2], x[3], x[4]];
+    let r2 = [q3n[0], q3n[1], q3n[2], q3n[3], q3n[4]];
+    let mut r = sub_limbs_le_5(r1, &r2);
 
-    let mut r4 = [r[0], r[1], r[2], r[3]];
-    if r[4] != 0 {
-        r4 = sub_limbs_le_4(r4, &SECP256K1_ORDER_LIMBS_LE);
+    for _ in 0..2 {
+        if cmp_limbs_le_5(&r, &SECP256K1_ORDER_LIMBS_LE_5) == core::cmp::Ordering::Less {
+            break;
+        }
+        r = sub_limbs_le_5(r, &SECP256K1_ORDER_LIMBS_LE_5);
     }
-    if cmp_limbs_le_4(&r4, &SECP256K1_ORDER_LIMBS_LE) != core::cmp::Ordering::Less {
-        r4 = sub_limbs_le_4(r4, &SECP256K1_ORDER_LIMBS_LE);
-    }
-    r4
+    debug_assert!(cmp_limbs_le_5(&r, &SECP256K1_ORDER_LIMBS_LE_5) == core::cmp::Ordering::Less);
+
+    [r[0], r[1], r[2], r[3]]
 }
 
 pub fn mul_mod_n_barrett(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
@@ -482,6 +500,69 @@ mod tests {
             let expected = mul_mod_bigint(&a, &b);
             let got = mul_mod(&a, &b);
             assert_eq!(got, expected, "mul_mod mismatch at i={i}");
+        }
+    }
+
+    /// Regression: Barrett's `q3` can under-estimate the quotient by 2, leaving a raw remainder
+    /// in `[2n, 3n)` — up to 258 bits. The reduction used to truncate that intermediate to 257
+    /// bits, so these operands (a node key whose x-coordinate sits near the top of the range,
+    /// against a PoP `s`) reduced to the wrong residue and failed an otherwise valid proof.
+    #[test]
+    fn mul_mod_reduces_product_whose_barrett_remainder_needs_258_bits() {
+        let px: [u8; 32] = [
+            0xff, 0xdc, 0x6b, 0xac, 0x17, 0xdb, 0xb7, 0xc5, 0x32, 0x54, 0x97, 0xe4, 0x7e, 0xb4,
+            0x58, 0x83, 0xd6, 0xea, 0x83, 0x2e, 0xa5, 0xa2, 0x6e, 0x30, 0x6b, 0x79, 0xa5, 0xe7,
+            0xb4, 0xa3, 0x92, 0x15,
+        ];
+        let s: [u8; 32] = [
+            0xf5, 0x76, 0x51, 0x9d, 0x0b, 0x91, 0xa5, 0x1a, 0x47, 0x00, 0x8e, 0x45, 0xf7, 0xa8,
+            0xdc, 0x12, 0x3c, 0x5f, 0xec, 0x46, 0xeb, 0xa5, 0x54, 0x20, 0x89, 0x99, 0xb1, 0x4d,
+            0x19, 0x3c, 0x4b, 0x7c,
+        ];
+
+        // Raw remainder here is ~2.058n, i.e. above 2^257.
+        assert_eq!(mul_mod(&s, &px), mul_mod_bigint(&s, &px));
+    }
+
+    /// The failure is rare for uniform operands (~1 in 16k) but an order of magnitude denser
+    /// when a factor sits near `n`, because that is what pushes the raw remainder past `2n`.
+    /// Sweep both, deterministically, so a regression cannot hide behind a lucky seed.
+    #[test]
+    fn mul_mod_matches_bigint_over_uniform_and_near_order_operands() {
+        let mut checked = 0u32;
+        for i in 0u32..40_000 {
+            let mut a = hashv(&[b"mul-mod-sweep-a", &i.to_be_bytes()]).to_bytes();
+            let b = hashv(&[b"mul-mod-sweep-b", &i.to_be_bytes()]).to_bytes();
+
+            // Half uniform, half with the top byte forced high (operand just under n).
+            if i % 2 == 0 {
+                a[0] = 0xff;
+            }
+
+            assert_eq!(
+                mul_mod(&a, &b),
+                mul_mod_bigint(&a, &b),
+                "mul_mod disagrees with bigint at i={i}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 40_000);
+    }
+
+    /// Every reduction must land strictly inside `[0, n)`, including the ones that need two
+    /// corrective subtractions.
+    #[test]
+    fn mul_mod_output_is_always_canonical() {
+        for i in 0u32..20_000 {
+            let mut a = hashv(&[b"canonical-a", &i.to_be_bytes()]).to_bytes();
+            let mut b = hashv(&[b"canonical-b", &i.to_be_bytes()]).to_bytes();
+            a[0] = 0xff;
+            b[0] = 0xff;
+            let out = mul_mod(&a, &b);
+            assert!(
+                cmp_be(&out, &SECP256K1_ORDER) == core::cmp::Ordering::Less,
+                "mul_mod returned a non-canonical scalar at i={i}"
+            );
         }
     }
 

@@ -27,6 +27,7 @@ pub mod coalition;
 pub mod error;
 pub mod message;
 pub mod onchain;
+pub mod partial;
 pub mod payload;
 pub mod pop;
 pub mod scalar;
@@ -39,6 +40,7 @@ pub mod verify;
 
 pub use error::AttestationError;
 pub use onchain::*;
+pub use partial::{verify_partial_signature_equation, NonceEquationError};
 pub use payload::Attestation;
 pub use payload::AttestationPayload;
 pub use payload::SchnorrSignature;

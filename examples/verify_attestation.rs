@@ -8,7 +8,7 @@
 use borsh::BorshDeserialize;
 use molpha_verifier::{
     bitmap::{for_each_set_bit, Bitmap},
-    compute_message_hash, fixtures, verify_core, Attestation, AttestationError, AttestationPayload,
+    compute_message_hash, fixtures, verify, Attestation, AttestationError, AttestationPayload,
     SchnorrSignature,
 };
 
@@ -56,7 +56,7 @@ fn main() -> Result<(), AttestationError> {
     let mut ordered_signers = Vec::new();
     for_each_set_bit(Bitmap::load(&fixtures::SIGNERS_BITMAP), |i| {
         ordered_signers.push(fixtures::PUBKEYS[i]);
-        Ok(())
+        Ok::<(), std::convert::Infallible>(())
     })
     .unwrap();
 
@@ -66,7 +66,7 @@ fn main() -> Result<(), AttestationError> {
         redundancy_buffer: fixtures::REDUNDANCY_BUFFER,
         nodes: &[],
     };
-    verify_core(&attestation, &ordered_signers, &registry)?;
+    verify(&attestation, &ordered_signers, &registry)?;
 
     println!("aggregate Schnorr signature: OK");
     Ok(())

@@ -47,15 +47,13 @@ pub use payload::SchnorrSignature;
 pub use pop::{validate_key_and_verify_pop, NodePopError, NODE_POP_PREFIX};
 pub use state::*;
 
-pub use verify::{
-    reconstruct_coalition_key, verify_core, verify_aggregate_over_hash,
-};
+pub use verify::{reconstruct_coalition_key, verify, verify_aggregate_over_hash};
 
-pub use bitmap::{Bitmap, derive_group_bitmap, effective_selection_size, for_each_set_bit};
-pub use selection::{derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX};
+pub use bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};
 pub use coalition::CoalitionAccumulator;
 pub use message::{compute_message_hash, MESSAGE_PREFIX};
 pub use scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,
     secp256k1_scalar_is_valid_nonzero,
 };
+pub use selection::{derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX};

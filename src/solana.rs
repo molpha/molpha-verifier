@@ -36,9 +36,9 @@ use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
 use crate::{
-    onchain::{IntersectedResolution, resolve_intersected_signers, resolve_signers},
+    onchain::{resolve_intersected_signers, resolve_signers, IntersectedResolution},
     state::{SignerXy, MAX_REGISTRY_NODES},
-    verify::{verify_aggregate_over_hash, verify_core},
+    verify::{verify, verify_aggregate_over_hash},
     Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature,
 };
 
@@ -194,10 +194,10 @@ impl RegistryView<'_> {
         };
 
         let view = Self {
-            version: version,
-            node_count: node_count,
-            redundancy_buffer: redundancy_buffer,
-            nodes: nodes,
+            version,
+            node_count,
+            redundancy_buffer,
+            nodes,
         };
 
         Ok(view)
@@ -262,7 +262,9 @@ pub fn resolve_intersected_signers_accounts(
         .iter()
         .map(|account| NodeEntry::load(account))
         .collect::<Result<Vec<NodeEntry>, AccountError>>()?;
-    Ok(resolve_intersected_signers(&nodes, &registry, bitmap_a, bitmap_b)?)
+    Ok(resolve_intersected_signers(
+        &nodes, &registry, bitmap_a, bitmap_b,
+    )?)
 }
 
 fn resolve_signers_accounts_core(
@@ -274,12 +276,12 @@ fn resolve_signers_accounts_core(
         .iter()
         .map(|account| NodeEntry::load(account))
         .collect::<Result<Vec<NodeEntry>, AccountError>>()?;
-    let signers = resolve_signers(&nodes, &registry, signers_bitmap)?;
+    let signers = resolve_signers(&nodes, registry, signers_bitmap)?;
     Ok(signers)
 }
 
 /// Verify an attestation from its `Registry` and signer `Node` accounts.
-pub fn verify_attestation_accounts(
+pub fn verify_attestation(
     attestation: &Attestation,
     registry_account: &AccountInfo<'_>,
     node_accounts: &[AccountInfo<'_>],
@@ -287,20 +289,18 @@ pub fn verify_attestation_accounts(
     let registry = RegistryView::load(registry_account)?;
 
     let ordered_signers = resolve_signers_accounts_core(
-        &node_accounts,
+        node_accounts,
         &registry,
         &attestation.signature.signers_bitmap,
     )?;
 
     if attestation.payload.registry_version != registry.version {
-        return Err(AccountError::Attestation(AttestationError::InvalidRegistryVersion));
+        return Err(AccountError::Attestation(
+            AttestationError::InvalidRegistryVersion,
+        ));
     }
 
-    Ok(verify_core(
-        attestation,
-        &ordered_signers,
-        &registry,
-    )?)
+    Ok(verify(attestation, &ordered_signers, &registry)?)
 }
 
 /// Verify an aggregate over an arbitrary message hash from accounts (dispute / slash).
@@ -319,7 +319,7 @@ pub fn verify_aggregate_over_hash_accounts(
         return Err(AccountError::InvalidRegistryAccount);
     }
     let ordered_signers =
-        resolve_signers_accounts_core(&node_accounts, &registry, &signature.signers_bitmap)?;
+        resolve_signers_accounts_core(node_accounts, &registry, &signature.signers_bitmap)?;
     Ok(verify_aggregate_over_hash(
         &signature.agg_sig_s,
         &signature.commitment,
@@ -418,7 +418,7 @@ mod tests {
     }
 
     fn signer_indices() -> Vec<usize> {
-        use crate::bitmap::{Bitmap, for_each_set_bit};
+        use crate::bitmap::{for_each_set_bit, Bitmap};
         let mut indices = Vec::new();
         for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |bit| {
             indices.push(bit);
@@ -602,7 +602,8 @@ mod tests {
                 &PROGRAM_ID,
                 false,
             );
-            NodeEntry::load(&info).unwrap_or_else(|_| panic!("status tag {tag} must not block load"));
+            NodeEntry::load(&info)
+                .unwrap_or_else(|_| panic!("status tag {tag} must not block load"));
         }
     }
 
@@ -610,7 +611,7 @@ mod tests {
     fn verify_attestation_accounts_accepts_fixture() {
         let mut accounts = Accounts::new();
         let (registry, nodes) = accounts.split();
-        verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
+        verify_attestation(&fixture_attestation(), &registry, &nodes)
             .expect("account-path fixture must verify");
     }
 
@@ -619,8 +620,7 @@ mod tests {
         let mut accounts = Accounts::with_version(REGISTRY_VERSION + 1);
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
-                .unwrap_err(),
+            verify_attestation(&fixture_attestation(), &registry, &nodes).unwrap_err(),
             AccountError::Attestation(AttestationError::InvalidRegistryVersion)
         );
     }
@@ -632,8 +632,7 @@ mod tests {
         accounts.node_data.swap(0, 1);
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
-                .unwrap_err(),
+            verify_attestation(&fixture_attestation(), &registry, &nodes).unwrap_err(),
             AccountError::Attestation(AttestationError::MissingSignerAccount)
         );
     }
@@ -646,8 +645,7 @@ mod tests {
         accounts.node_lamports.pop();
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
-                .unwrap_err(),
+            verify_attestation(&fixture_attestation(), &registry, &nodes).unwrap_err(),
             AccountError::Attestation(AttestationError::MissingSignerAccount)
         );
     }
@@ -665,8 +663,7 @@ mod tests {
         };
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
-                .unwrap_err(),
+            verify_attestation(&fixture_attestation(), &registry, &nodes).unwrap_err(),
             AccountError::Attestation(AttestationError::MissingSignerAccount)
         );
     }
@@ -678,7 +675,7 @@ mod tests {
         attestation.payload.value[31] ^= 0x01;
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&attestation, &registry, &nodes).unwrap_err(),
+            verify_attestation(&attestation, &registry, &nodes).unwrap_err(),
             AccountError::Attestation(AttestationError::InvalidAggregateSignature)
         );
     }
@@ -728,8 +725,7 @@ mod tests {
         accounts.node_data[0][0] ^= 0xff;
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
-                .unwrap_err(),
+            verify_attestation(&fixture_attestation(), &registry, &nodes).unwrap_err(),
             AccountError::InvalidNodeAccount
         );
     }
@@ -743,8 +739,7 @@ mod tests {
         accounts.node_lamports.pop();
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
-                .unwrap_err(),
+            verify_attestation(&fixture_attestation(), &registry, &nodes).unwrap_err(),
             AccountError::InvalidNodeAccount
         );
     }

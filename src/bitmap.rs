@@ -130,7 +130,7 @@ where
     F: FnMut(usize) -> Result<(), E>,
 {
     while bm != Bitmap::EMPTY {
-        let bit_pos = bm.trailing_zeros() as usize;
+        let bit_pos = bm.trailing_zeros();
         bm.clear_bit(bit_pos);
         f(bit_pos)?;
     }

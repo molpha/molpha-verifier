@@ -5,9 +5,7 @@ mod fixtures;
 use ethnum::U256;
 use libsecp256k1::PublicKey;
 use molpha_verifier::{
-    bitmap::{
-        Bitmap, derive_group_bitmap, effective_selection_size, for_each_set_bit,
-    },
+    bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap},
     coalition::{public_key_from_affine_xy, CoalitionAccumulator},
     message::compute_message_hash,
     payload::{AttestationPayload, SchnorrSignature},

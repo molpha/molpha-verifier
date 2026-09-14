@@ -2,10 +2,7 @@
 
 use solana_keccak_hasher::hashv;
 
-use crate::bitmap::{
-    Bitmap, derive_group_bitmap,
-    effective_selection_size,
-};
+use crate::bitmap::{derive_group_bitmap, effective_selection_size, Bitmap};
 use crate::error::AttestationError;
 use crate::RegistryView;
 
@@ -35,8 +32,11 @@ pub fn derive_selection_bitmap(
         canonical_timestamp_bytes.as_ref(),
     ])
     .to_bytes();
-    let selection_size =
-        effective_selection_size(signatures_required, registry.redundancy_buffer as u8, registry.node_count as u32);
+    let selection_size = effective_selection_size(
+        signatures_required,
+        registry.redundancy_buffer,
+        registry.node_count as u32,
+    );
     derive_group_bitmap(&selection_seed, registry.node_count as u32, selection_size)
 }
 
@@ -60,7 +60,12 @@ pub fn verify_selection(
         return Err(AttestationError::InsufficientSigners);
     }
 
-    let expected_selection_bitmap = derive_selection_bitmap(source_id, canonical_timestamp, signatures_required, registry)?;
+    let expected_selection_bitmap = derive_selection_bitmap(
+        source_id,
+        canonical_timestamp,
+        signatures_required,
+        registry,
+    )?;
     Ok(signers.is_subset(&expected_selection_bitmap))
 }
 

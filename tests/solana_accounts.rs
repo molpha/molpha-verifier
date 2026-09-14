@@ -7,9 +7,9 @@ use molpha_verifier::fixtures::{
     REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
 };
 use molpha_verifier::solana::{
-    verify_attestation_accounts, AccountError, DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN,
+    verify_attestation_accounts, AccountError, RegistryView, DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN,
     NODE_BUMP_OFFSET, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, NODE_STATUS_OFFSET, PROGRAM_ID,
-    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX, RegistryView,
+    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
 };
 use molpha_verifier::{Attestation, AttestationPayload, SchnorrSignature};
 

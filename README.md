@@ -116,7 +116,7 @@ verify_attestation_resolved(&attestation, &registry, &entries)?;
 
 Requires `attestation.payload.registry_version == registry.version`. The caller must owner-check and deserialize accounts; this crate binds each set bit to `registry.nodes[bit]` and runs crypto.
 
-Signer resolution alone: `resolve_signers` / `resolve_registry_signers_indexed` (the indexed form also returns bit positions). For two overlapping bitmaps, `resolve_intersected_signers` walks the union once.
+Signer resolution alone: `resolve_signers`. For two overlapping bitmaps, `resolve_intersected_signers` walks the union once.
 
 ### Node key registration
 

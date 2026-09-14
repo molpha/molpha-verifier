@@ -4,6 +4,7 @@
 
 use solana_secp256k1_recover::secp256k1_recover;
 
+use crate::bitmap::Bitmap;
 use crate::coalition::CoalitionAccumulator;
 use crate::error::AttestationError;
 use crate::message::compute_message_hash;
@@ -14,7 +15,6 @@ use crate::scalar::{
 };
 use crate::selection::verify_selection;
 use crate::state::{RegistryView, SignerXy};
-use crate::bitmap::Bitmap;
 
 /// Verify an attestation against caller-supplied signer pubkeys.
 ///
@@ -25,7 +25,7 @@ use crate::bitmap::Bitmap;
 ///
 /// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
 /// (scalar → threshold → count → selection → coalition → hash → recovery); acceptance is unchanged.
-pub fn verify_core(
+pub fn verify(
     attestation: &Attestation,
     ordered_signers: &[SignerXy],
     registry: &RegistryView,
@@ -132,7 +132,7 @@ mod tests {
     use libsecp256k1::PublicKey;
 
     fn fixture_signers_xy() -> Vec<SignerXy> {
-        use crate::bitmap::{Bitmap, for_each_set_bit};
+        use crate::bitmap::{for_each_set_bit, Bitmap};
         let mut signers = Vec::new();
         for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |i| {
             signers.push(PUBKEYS[i]);
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn verify_attestation_accepts_fixture() {
         let attestation = fixture_attestation();
-        verify_core(&attestation, &fixture_signers_xy(), &fixture_registry())
+        verify(&attestation, &fixture_signers_xy(), &fixture_registry())
             .expect("fixture attestation must verify");
     }
 
@@ -209,7 +209,7 @@ mod tests {
     fn tampered_s_fails_verification() {
         let mut attestation = fixture_attestation();
         attestation.signature.agg_sig_s[31] ^= 0x01;
-        let res = verify_core(&attestation, &fixture_signers_xy(), &fixture_registry());
+        let res = verify(&attestation, &fixture_signers_xy(), &fixture_registry());
         assert_eq!(res, Err(AttestationError::InvalidAggregateSignature));
     }
 
@@ -219,7 +219,7 @@ mod tests {
         let mut signers = fixture_signers_xy();
         signers.pop();
         assert_eq!(
-            verify_core(&attestation, &signers, &fixture_registry()),
+            verify(&attestation, &signers, &fixture_registry()),
             Err(AttestationError::SignerCountMismatch)
         );
     }

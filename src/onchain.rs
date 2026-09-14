@@ -4,22 +4,28 @@
 //! Each set bit of `signers_bitmap` binds to `registry.nodes[bit]`. Node status is ignored —
 //! a node deactivated later remains valid evidence for historical snapshots.
 
-use crate::verify::{verify_aggregate_over_hash, verify_core};
+use crate::verify::{verify, verify_aggregate_over_hash};
 use crate::{
-    bitmap::{Bitmap, for_each_set_bit},
+    bitmap::{for_each_set_bit, Bitmap},
     Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature, SignerXy,
 };
 
-/// Walk set bits of `signers` in ascending order; bind each to its registry slot and entry.
-fn for_each_resolved_signer<F>(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntersectedResolution {
+    pub signers_a: Vec<SignerXy>,
+    pub signers_b: Vec<SignerXy>,
+    pub intersected_bitmap: Bitmap,
+    pub unioned_bitmap: Bitmap,
+}
+
+pub fn resolve_signers(
     nodes: &[NodeEntry],
     registry: &RegistryView<'_>,
-    signers: Bitmap,
-    mut visit: F,
-) -> Result<(), AttestationError>
-where
-    F: FnMut(usize, &NodeEntry) -> Result<(), AttestationError>,
-{
+    signers_bitmap: &[u8; 32],
+) -> Result<Vec<SignerXy>, AttestationError> {
+    let signers = Bitmap::load(signers_bitmap);
+    let mut ordered = Vec::with_capacity(signers.popcount() as usize);
+
     if nodes.len() != signers.popcount() as usize {
         return Err(AttestationError::MissingSignerAccount);
     }
@@ -30,41 +36,19 @@ where
             return Err(AttestationError::InvalidSignersBitmap);
         }
 
-        let node_key = registry.nodes[bit_pos];
         let entry = nodes
             .get(cursor)
             .ok_or(AttestationError::MissingSignerAccount)?;
-        if entry.account != node_key {
+        if entry.account != registry.nodes[bit_pos] {
             return Err(AttestationError::MissingSignerAccount);
         }
 
         cursor = cursor.saturating_add(1);
-        visit(bit_pos, entry)
-    })?;
-
-    Ok(())
-}
-
-pub fn resolve_signers(
-    nodes: &[NodeEntry],
-    registry: &RegistryView<'_>,
-    signers_bitmap: &[u8; 32],
-) -> Result<Vec<SignerXy>, AttestationError> {
-    let signers = Bitmap::load(signers_bitmap);
-    let mut ordered = Vec::with_capacity(signers.popcount() as usize);
-    for_each_resolved_signer(nodes, registry, signers, | _, entry | {
         ordered.push((entry.x, entry.y));
         Ok(())
     })?;
 
     Ok(ordered)
-}
-
-pub struct IntersectedResolution {
-    pub signers_a: Vec<SignerXy>,
-    pub signers_b: Vec<SignerXy>,
-    pub intersected_bitmap: Bitmap,
-    pub unioned_bitmap: Bitmap,
 }
 
 pub fn resolve_intersected_signers(
@@ -85,19 +69,20 @@ pub fn resolve_intersected_signers(
     let mut cursor = 0usize;
     let mut ordered_a = Vec::with_capacity(intersected.popcount() as usize);
     let mut ordered_b = Vec::with_capacity(intersected.popcount() as usize);
-    
+
     for_each_set_bit(unioned, |bit_pos| {
         if bit_pos >= registry.node_count as usize {
             return Err(AttestationError::InvalidSignersBitmap);
         }
 
-        let node_key = registry.nodes[bit_pos];
         let entry = nodes
             .get(cursor)
             .ok_or(AttestationError::MissingSignerAccount)?;
-        if entry.account != node_key {
+        if entry.account != registry.nodes[bit_pos] {
             return Err(AttestationError::MissingSignerAccount);
         }
+
+        cursor = cursor.saturating_add(1);
 
         if signers_a.bit_set(bit_pos) {
             ordered_a.push((entry.x, entry.y));
@@ -106,10 +91,8 @@ pub fn resolve_intersected_signers(
             ordered_b.push((entry.x, entry.y));
         }
 
-        cursor = cursor.saturating_add(1);
         Ok(())
     })?;
-
 
     let resolution = IntersectedResolution {
         signers_a: ordered_a,
@@ -119,21 +102,6 @@ pub fn resolve_intersected_signers(
     };
 
     Ok(resolution)
-}
-
-/// Like [`resolve_signers`], also returning each signer's bit position.
-pub fn resolve_registry_signers_indexed(
-    nodes: &[NodeEntry],
-    registry: &RegistryView<'_>,
-    signers_bitmap: &[u8; 32],
-) -> Result<Vec<(usize, SignerXy)>, AttestationError> {
-    let signers = Bitmap::load(signers_bitmap);
-    let mut ordered = Vec::with_capacity(signers.popcount() as usize);
-    for_each_resolved_signer(nodes, registry, signers, |bit_pos, entry| {
-        ordered.push((bit_pos, (entry.x, entry.y)));
-        Ok(())
-    })?;
-    Ok(ordered)
 }
 
 /// Verify an attestation after resolving signers against a registry snapshot.
@@ -146,14 +114,9 @@ pub fn verify_attestation_resolved(
         return Err(AttestationError::InvalidRegistryVersion);
     }
 
-    let ordered_signers =
-        resolve_signers(nodes, registry, &attestation.signature.signers_bitmap)?;
+    let ordered_signers = resolve_signers(nodes, registry, &attestation.signature.signers_bitmap)?;
 
-    verify_core(
-        attestation,
-        &ordered_signers,
-        registry,
-    )
+    verify(attestation, &ordered_signers, registry)
 }
 
 /// Verify an aggregate over an arbitrary message hash after resolving signers.
@@ -177,7 +140,7 @@ pub fn verify_aggregate_over_hash_resolved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitmap::{Bitmap, for_each_set_bit};
+    use crate::bitmap::{for_each_set_bit, Bitmap};
     use crate::fixtures::{
         CANONICAL_TIMESTAMP, COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT,
         REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
@@ -248,24 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_signers_indexed_returns_ascending_bits() {
-        let nodes_array = fixture_nodes();
-        let registry = fixture_registry(&nodes_array);
-        let entries = fixture_entries(&nodes_array);
-        let indexed = resolve_registry_signers_indexed(&entries, &registry, &SIGNERS_BITMAP)
-            .expect("fixture must resolve");
-
-        let mut expected_bits = Vec::new();
-        for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |bit| {
-            expected_bits.push(bit);
-            Ok::<(), AttestationError>(())
-        })
-        .unwrap();
-        let got_bits: Vec<usize> = indexed.iter().map(|(b, _)| *b).collect();
-        assert_eq!(got_bits, expected_bits);
-    }
-
-    #[test]
     fn resolve_rejects_out_of_range_bit() {
         let mut nodes_array = [[0u8; 32]; MAX_REGISTRY_NODES];
         nodes_array[0] = [1u8; 32];
@@ -306,12 +251,8 @@ mod tests {
         let registry = fixture_registry(&nodes_array);
         let entries = fixture_entries(&nodes_array);
 
-        let err = resolve_signers(
-            &entries[..entries.len() - 1],
-            &registry,
-            &SIGNERS_BITMAP,
-        )
-        .unwrap_err();
+        let err =
+            resolve_signers(&entries[..entries.len() - 1], &registry, &SIGNERS_BITMAP).unwrap_err();
         assert_eq!(err, AttestationError::MissingSignerAccount);
 
         let mut extra = entries.clone();

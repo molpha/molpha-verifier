@@ -7,13 +7,8 @@
 
 use borsh::BorshDeserialize;
 use molpha_verifier::{
-    bitmap::{Bitmap, for_each_set_bit},
-    compute_message_hash,
-    fixtures,
-    verify_core,
-    Attestation,
-    AttestationError,
-    AttestationPayload,
+    bitmap::{for_each_set_bit, Bitmap},
+    compute_message_hash, fixtures, verify_core, Attestation, AttestationError, AttestationPayload,
     SchnorrSignature,
 };
 

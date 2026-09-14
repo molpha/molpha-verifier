@@ -1,10 +1,13 @@
 //! Deterministic selection-bitmap derivation for a `(source_id, registry_version, timestamp)` round.
 
-use ethnum::U256;
 use solana_keccak_hasher::hashv;
 
-use crate::bitmap::{bitmap_store, derive_group_bitmap_u256, effective_selection_size};
+use crate::bitmap::{
+    Bitmap, derive_group_bitmap,
+    effective_selection_size,
+};
 use crate::error::AttestationError;
+use crate::RegistryView;
 
 /// `keccak256("MOLPHA_SELECTION_V1")` domain separator.
 pub const SELECTION_SEED_PREFIX: [u8; 32] = [
@@ -15,35 +18,15 @@ pub const SELECTION_SEED_PREFIX: [u8; 32] = [
 /// Derive the selection bitmap for a round.
 ///
 /// `seed = keccak(SELECTION_SEED_PREFIX, source_id, registry_version_be, canonical_timestamp_be)`,
-/// then `derive_group_bitmap(seed, node_count, effective_selection_size(...))`.
+/// then [`derive_group_bitmap`](crate::bitmap::derive_group_bitmap) with
+/// [`effective_selection_size`](crate::bitmap::effective_selection_size).
 pub fn derive_selection_bitmap(
     source_id: &[u8; 32],
-    registry_version: u32,
     canonical_timestamp: u64,
-    node_count: u32,
     signatures_required: u8,
-    redundancy_buffer: u8,
-) -> Result<[u8; 32], AttestationError> {
-    Ok(bitmap_store(derive_selection_bitmap_u256(
-        source_id,
-        registry_version,
-        canonical_timestamp,
-        node_count,
-        signatures_required,
-        redundancy_buffer,
-    )?))
-}
-
-/// [`derive_selection_bitmap`] returning `U256` (avoids a store/load round-trip).
-pub fn derive_selection_bitmap_u256(
-    source_id: &[u8; 32],
-    registry_version: u32,
-    canonical_timestamp: u64,
-    node_count: u32,
-    signatures_required: u8,
-    redundancy_buffer: u8,
-) -> Result<U256, AttestationError> {
-    let registry_version_bytes = registry_version.to_be_bytes();
+    registry: &RegistryView,
+) -> Result<Bitmap, AttestationError> {
+    let registry_version_bytes = registry.version.to_be_bytes();
     let canonical_timestamp_bytes = canonical_timestamp.to_be_bytes();
     let selection_seed = hashv(&[
         SELECTION_SEED_PREFIX.as_slice(),
@@ -53,8 +36,32 @@ pub fn derive_selection_bitmap_u256(
     ])
     .to_bytes();
     let selection_size =
-        effective_selection_size(signatures_required, redundancy_buffer, node_count);
-    derive_group_bitmap_u256(&selection_seed, node_count, selection_size)
+        effective_selection_size(signatures_required, registry.redundancy_buffer as u8, registry.node_count as u32);
+    derive_group_bitmap(&selection_seed, registry.node_count as u32, selection_size)
+}
+
+/// Selection / threshold checks shared by attestation verification.
+///
+/// Returns `Ok(true)` when `signers ⊆ expected_selection` and counts match; `Ok(false)` when the
+/// bitmap is a strict superset of the allowed selection. Structural problems surface as `Err`.
+pub fn verify_selection(
+    source_id: &[u8; 32],
+    canonical_timestamp: u64,
+    signatures_required: u8,
+    registry: &RegistryView,
+    signers_bitmap: &[u8; 32],
+) -> Result<bool, AttestationError> {
+    let signers = Bitmap::load(signers_bitmap);
+    let signer_count = signers.popcount();
+    if signer_count == 0 {
+        return Err(AttestationError::InvalidSignersBitmap);
+    }
+    if signer_count < u32::from(signatures_required) {
+        return Err(AttestationError::InsufficientSigners);
+    }
+
+    let expected_selection_bitmap = derive_selection_bitmap(source_id, canonical_timestamp, signatures_required, registry)?;
+    Ok(signers.is_subset(&expected_selection_bitmap))
 }
 
 #[cfg(test)]

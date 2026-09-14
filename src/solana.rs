@@ -10,9 +10,10 @@
 //! 1. **Owner** — `account.owner == program_id`
 //! 2. **Discriminator** — matches [`REGISTRY_DISCRIMINATOR`] / [`NODE_DISCRIMINATOR`]
 //! 3. **Length** — at least [`REGISTRY_ACCOUNT_LEN`] / [`NODE_ACCOUNT_LEN`]
-//! 4. **Well-formedness** — `Node` status tag is in range
+//! 4. **Well-formedness** — pubkey `(x, y)` at fixed offsets
 //!
-//! Node status is range-checked only; historical snapshots may still use deactivated nodes.
+//! Node status is not consulted during verification; historical snapshots may still use
+//! deactivated nodes.
 //! Body fields are read at fixed offsets pinned to the program layout. Discriminator / length
 //! checks fail closed on rename / truncation; appending fields stays compatible.
 //!
@@ -25,7 +26,6 @@
 //!     &attestation,
 //!     &registry_account,
 //!     ctx.remaining_accounts,
-//!     ctx.program_id,
 //! )?;
 //! ```
 
@@ -36,8 +36,9 @@ use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
 use crate::{
-    onchain::{verify_aggregate_over_hash_resolved, verify_attestation_resolved},
-    state::MAX_REGISTRY_NODES,
+    onchain::{IntersectedResolution, resolve_intersected_signers, resolve_signers},
+    state::{SignerXy, MAX_REGISTRY_NODES},
+    verify::{verify_aggregate_over_hash, verify_core},
     Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature,
 };
 
@@ -62,6 +63,9 @@ pub const REGISTRY_ACCOUNT_LEN: usize = 8_208;
 /// Serialized `Node` account length including discriminator.
 pub const NODE_ACCOUNT_LEN: usize = 152;
 
+pub const PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("MoLFnEbuMS5gWnXNfUMLAYSqRM3eQZKWRzjeMQfqbT3");
+
 // Registry is zero_copy / repr(C): version(u32), node_count(u16), redundancy_buffer(u8), bump(u8),
 // then nodes[[u8;32]; 256]. Header is 8 bytes with no padding.
 const REGISTRY_VERSION_OFFSET: usize = DISCRIMINATOR_LEN;
@@ -82,9 +86,6 @@ pub const NODE_STATUS_OFFSET: usize = NODE_PUBKEY_Y_OFFSET + 32;
 pub const NODE_BUMP_OFFSET: usize = NODE_STATUS_OFFSET + 1 + 4 + 2 + 5 * 8;
 
 const _: () = assert!(NODE_BUMP_OFFSET + 1 == NODE_ACCOUNT_LEN);
-
-/// Highest `NodeStatus` tag (`Tombstoned = 3`).
-const NODE_STATUS_MAX_TAG: u8 = 3;
 
 /// Base for [`AccountError::code`] (`0x4D4F_0000` = ASCII `"MO"`).
 pub const ERROR_CODE_BASE: u32 = 0x4D4F_0000;
@@ -158,44 +159,9 @@ impl From<AccountError> for ProgramError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Signer {
-    pub x: [u8; 32],
-    pub y: [u8; 32],
-}
-
-impl Signer {
-    fn from_node_account_bytes(data: &[u8]) -> Result<Self, AccountError> {
-        if data.len() < NODE_ACCOUNT_LEN || data[..DISCRIMINATOR_LEN] != NODE_DISCRIMINATOR {
-            return Err(AccountError::InvalidNodeAccount);
-        }
-        if data[NODE_STATUS_OFFSET] > NODE_STATUS_MAX_TAG {
-            return Err(AccountError::InvalidNodeAccount);
-        }
-        Ok(Self {
-            x: read_32(data, NODE_PUBKEY_X_OFFSET),
-            y: read_32(data, NODE_PUBKEY_Y_OFFSET),
-        })
-    }
-}
-
-#[inline]
-fn read_32(data: &[u8], offset: usize) -> [u8; 32] {
-    data[offset..offset + 32]
-        .try_into()
-        .expect("length checked by caller")
-}
-
-/// Validated, borrowed `Registry` account (holds the data borrow for zero-copy `nodes`).
-pub struct RegistryAccount<'a> {
-    key: Pubkey,
-    data: Ref<'a, [u8]>,
-}
-
-impl<'a> RegistryAccount<'a> {
-    /// Borrow and validate a `Registry` account (owner / discriminator / length).
-    pub fn load(account: &'a AccountInfo<'_>, program_id: &Pubkey) -> Result<Self, AccountError> {
-        if account.owner != program_id {
+impl RegistryView<'_> {
+    pub fn load(account: &AccountInfo<'_>) -> Result<Self, AccountError> {
+        if *account.owner != PROGRAM_ID {
             return Err(AccountError::InvalidAccountOwner);
         }
         let data = account
@@ -208,102 +174,108 @@ impl<'a> RegistryAccount<'a> {
             return Err(AccountError::InvalidRegistryAccount);
         }
 
-        let registry = Self {
-            key: *account.key,
-            data,
+        let version = u32::from_le_bytes(
+            data[REGISTRY_VERSION_OFFSET..REGISTRY_VERSION_OFFSET + 4]
+                .try_into()
+                .map_err(|_| AccountError::InvalidRegistryAccount)?,
+        );
+
+        let node_count = u16::from_le_bytes(
+            data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
+                .try_into()
+                .map_err(|_| AccountError::InvalidRegistryAccount)?,
+        );
+
+        let redundancy_buffer = data[REGISTRY_REDUNDANCY_BUFFER_OFFSET];
+
+        let node_bytes = &data[REGISTRY_NODES_OFFSET..REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN];
+        let nodes = unsafe {
+            core::slice::from_raw_parts(node_bytes.as_ptr().cast::<[u8; 32]>(), MAX_REGISTRY_NODES)
         };
-        Ok(registry)
+
+        let view = Self {
+            version: version,
+            node_count: node_count,
+            redundancy_buffer: redundancy_buffer,
+            nodes: nodes,
+        };
+
+        Ok(view)
     }
 
-    pub fn key(&self) -> &Pubkey {
-        &self.key
+    pub fn node_key(&self, index: usize) -> Result<Pubkey, AccountError> {
+        Ok(Pubkey::new_from_array(self.nodes[index]))
     }
+}
 
-    pub fn version(&self) -> u32 {
-        u32::from_le_bytes(
-            self.data[REGISTRY_VERSION_OFFSET..REGISTRY_VERSION_OFFSET + 4]
-                .try_into()
-                .expect("length checked in load"),
-        )
-    }
-
-    pub fn node_count(&self) -> u16 {
-        u16::from_le_bytes(
-            self.data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
-                .try_into()
-                .expect("length checked in load"),
-        )
-    }
-
-    pub fn redundancy_buffer(&self) -> u8 {
-        self.data[REGISTRY_REDUNDANCY_BUFFER_OFFSET]
-    }
-
-    pub fn bump(&self) -> u8 {
-        self.data[REGISTRY_BUMP_OFFSET]
-    }
-
-    /// Full ordered node-address array; only `[..node_count()]` is populated.
-    pub fn nodes(&self) -> &[[u8; 32]] {
-        let bytes = &self.data[REGISTRY_NODES_OFFSET..REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN];
-        // SAFETY: `bytes` is exactly `MAX_REGISTRY_NODES * 32` (bounds checked in `load`).
-        // `[u8; 32]` has alignment 1; returned slice borrows `self` with the data guard.
-        unsafe {
-            core::slice::from_raw_parts(bytes.as_ptr().cast::<[u8; 32]>(), MAX_REGISTRY_NODES)
+impl NodeEntry {
+    pub fn load(account: &AccountInfo<'_>) -> Result<Self, AccountError> {
+        if *account.owner != PROGRAM_ID {
+            return Err(AccountError::InvalidAccountOwner);
         }
-    }
 
-    /// Framework-agnostic view for resolution / verification.
-    pub fn view(&self) -> RegistryView<'_> {
-        RegistryView {
-            version: self.version(),
-            node_count: self.node_count(),
-            redundancy_buffer: self.redundancy_buffer(),
-            nodes: self.nodes(),
+        let data = account
+            .try_borrow_data()
+            .map_err(|_| AccountError::AccountBorrowFailed)?;
+        let data = Ref::map(data, |bytes| &**bytes);
+
+        if data.len() < NODE_ACCOUNT_LEN || data[..DISCRIMINATOR_LEN] != NODE_DISCRIMINATOR {
+            return Err(AccountError::InvalidNodeAccount);
         }
+
+        let x = read_32(&data, NODE_PUBKEY_X_OFFSET);
+        let y = read_32(&data, NODE_PUBKEY_Y_OFFSET);
+
+        let node = Self {
+            account: account.key.to_bytes(),
+            x,
+            y,
+        };
+        Ok(node)
     }
 }
 
-impl core::fmt::Debug for RegistryAccount<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RegistryAccount")
-            .field("key", &self.key)
-            .field("version", &self.version())
-            .field("node_count", &self.node_count())
-            .field("redundancy_buffer", &self.redundancy_buffer())
-            .field("bump", &self.bump())
-            .finish_non_exhaustive()
-    }
+#[inline]
+fn read_32(data: &[u8], offset: usize) -> [u8; 32] {
+    data[offset..offset + 32]
+        .try_into()
+        .expect("length checked by caller")
 }
 
-/// Validate and parse one `Node` account into a [`NodeEntry`].
-pub fn resolve_node(
-    account: &AccountInfo<'_>,
-    program_id: &Pubkey,
-) -> Result<NodeEntry, AccountError> {
-    if account.owner != program_id {
-        return Err(AccountError::InvalidAccountOwner);
-    }
-    let data = account
-        .try_borrow_data()
-        .map_err(|_| AccountError::AccountBorrowFailed)?;
-    let node = Signer::from_node_account_bytes(&data)?;
-    Ok(NodeEntry {
-        account: account.key.to_bytes(),
-        x: node.x,
-        y: node.y,
-    })
+pub fn resolve_signers_accounts(
+    accounts: &[AccountInfo],
+    registry_account: &AccountInfo<'_>,
+    signers_bitmap: &[u8; 32],
+) -> Result<Vec<SignerXy>, AccountError> {
+    let registry = RegistryView::load(registry_account)?;
+    resolve_signers_accounts_core(accounts, &registry, signers_bitmap)
 }
 
-/// Validate and parse signer `Node` accounts into [`NodeEntry`]s.
-pub fn resolve_nodes(
-    accounts: &[AccountInfo<'_>],
-    program_id: &Pubkey,
-) -> Result<Vec<NodeEntry>, AccountError> {
-    accounts
+pub fn resolve_intersected_signers_accounts(
+    accounts: &[AccountInfo],
+    registry_account: &AccountInfo<'_>,
+    bitmap_a: &[u8; 32],
+    bitmap_b: &[u8; 32],
+) -> Result<IntersectedResolution, AccountError> {
+    let registry = RegistryView::load(registry_account)?;
+    let nodes = accounts
         .iter()
-        .map(|account| resolve_node(account, program_id))
-        .collect()
+        .map(|account| NodeEntry::load(account))
+        .collect::<Result<Vec<NodeEntry>, AccountError>>()?;
+    Ok(resolve_intersected_signers(&nodes, &registry, bitmap_a, bitmap_b)?)
+}
+
+fn resolve_signers_accounts_core(
+    accounts: &[AccountInfo],
+    registry: &RegistryView<'_>,
+    signers_bitmap: &[u8; 32],
+) -> Result<Vec<SignerXy>, AccountError> {
+    let nodes = accounts
+        .iter()
+        .map(|account| NodeEntry::load(account))
+        .collect::<Result<Vec<NodeEntry>, AccountError>>()?;
+    let signers = resolve_signers(&nodes, &registry, signers_bitmap)?;
+    Ok(signers)
 }
 
 /// Verify an attestation from its `Registry` and signer `Node` accounts.
@@ -311,12 +283,24 @@ pub fn verify_attestation_accounts(
     attestation: &Attestation,
     registry_account: &AccountInfo<'_>,
     node_accounts: &[AccountInfo<'_>],
-    program_id: &Pubkey,
 ) -> Result<(), AccountError> {
-    let registry = RegistryAccount::load(registry_account, program_id)?;
-    let entries = resolve_nodes(node_accounts, program_id)?;
-    verify_attestation_resolved(attestation, &registry.view(), &entries)?;
-    Ok(())
+    let registry = RegistryView::load(registry_account)?;
+
+    let ordered_signers = resolve_signers_accounts_core(
+        &node_accounts,
+        &registry,
+        &attestation.signature.signers_bitmap,
+    )?;
+
+    if attestation.payload.registry_version != registry.version {
+        return Err(AccountError::Attestation(AttestationError::InvalidRegistryVersion));
+    }
+
+    Ok(verify_core(
+        attestation,
+        &ordered_signers,
+        &registry,
+    )?)
 }
 
 /// Verify an aggregate over an arbitrary message hash from accounts (dispute / slash).
@@ -329,33 +313,30 @@ pub fn verify_aggregate_over_hash_accounts(
     message_hash: &[u8; 32],
     registry_version: u32,
     node_accounts: &[AccountInfo<'_>],
-    program_id: &Pubkey,
 ) -> Result<bool, AccountError> {
-    let registry = RegistryAccount::load(registry_account, program_id)?;
-    if registry.version() != registry_version {
+    let registry = RegistryView::load(registry_account)?;
+    if registry.version != registry_version {
         return Err(AccountError::InvalidRegistryAccount);
     }
-    let entries = resolve_nodes(node_accounts, program_id)?;
-    Ok(verify_aggregate_over_hash_resolved(
-        &registry.view(),
-        &signature,
+    let ordered_signers =
+        resolve_signers_accounts_core(&node_accounts, &registry, &signature.signers_bitmap)?;
+    Ok(verify_aggregate_over_hash(
+        &signature.agg_sig_s,
+        &signature.commitment,
         message_hash,
-        &entries,
+        &ordered_signers,
     )?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitmap::for_each_set_bit;
     use crate::fixtures::{
         CANONICAL_TIMESTAMP, COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT,
         REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
     };
     use crate::message::compute_message_hash;
     use crate::payload::{AttestationPayload, SchnorrSignature};
-
-    const PROGRAM_ID: Pubkey = Pubkey::new_from_array([7u8; 32]);
 
     fn node_owner(index: usize) -> [u8; 32] {
         let mut owner = [0u8; 32];
@@ -437,8 +418,13 @@ mod tests {
     }
 
     fn signer_indices() -> Vec<usize> {
+        use crate::bitmap::{Bitmap, for_each_set_bit};
         let mut indices = Vec::new();
-        for_each_set_bit(&SIGNERS_BITMAP, |bit| indices.push(bit));
+        for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |bit| {
+            indices.push(bit);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
         indices
     }
 
@@ -481,17 +467,6 @@ mod tests {
                 &self.owner,
                 false,
             )
-        }
-
-        fn nodes(&mut self) -> Vec<AccountInfo<'_>> {
-            self.node_keys
-                .iter()
-                .zip(self.node_lamports.iter_mut())
-                .zip(self.node_data.iter_mut())
-                .map(|((key, lamports), data)| {
-                    AccountInfo::new(key, false, false, lamports, data, &self.owner, false)
-                })
-                .collect()
         }
 
         fn split(&mut self) -> (AccountInfo<'_>, Vec<AccountInfo<'_>>) {
@@ -538,278 +513,96 @@ mod tests {
     fn nodes_slice_matches_raw_account_bytes() {
         let mut accounts = Accounts::new();
         let info = accounts.registry();
-        let registry = RegistryAccount::load(&info, &PROGRAM_ID).expect("load registry");
+        let registry = RegistryView::load(&info).expect("load registry");
+        let data = info.try_borrow_data().expect("borrow registry data");
 
-        let nodes = registry.nodes();
-        assert_eq!(nodes.len(), MAX_REGISTRY_NODES);
-        for (index, node) in nodes.iter().enumerate() {
+        assert_eq!(registry.nodes.len(), MAX_REGISTRY_NODES);
+        for (index, node) in registry.nodes.iter().enumerate() {
             let offset = REGISTRY_NODES_OFFSET + index * 32;
-            assert_eq!(&node[..], &registry.data[offset..offset + 32]);
+            assert_eq!(&node[..], &data[offset..offset + 32]);
         }
-        for (index, node) in nodes
+        for (index, node) in registry
+            .nodes
             .iter()
             .enumerate()
             .take(REGISTERED_NODE_COUNT as usize)
         {
             assert_eq!(*node, node_pda(index).0.to_bytes());
         }
-        assert_eq!(nodes[REGISTERED_NODE_COUNT as usize], [0u8; 32]);
-    }
-
-    #[test]
-    fn registry_account_exposes_header_fields() {
-        let mut accounts = Accounts::new();
-        let info = accounts.registry();
-        let registry = RegistryAccount::load(&info, &PROGRAM_ID).expect("load registry");
-
-        assert_eq!(registry.version(), REGISTRY_VERSION);
-        assert_eq!(registry.node_count(), REGISTERED_NODE_COUNT as u16);
-        assert_eq!(registry.redundancy_buffer(), REDUNDANCY_BUFFER);
-        assert_eq!(registry.bump(), registry_pda(REGISTRY_VERSION).1);
-        assert_eq!(*registry.key(), registry_pda(REGISTRY_VERSION).0);
-
-        let view = registry.view();
-        assert_eq!(view.version, REGISTRY_VERSION);
-        assert_eq!(view.node_count, REGISTERED_NODE_COUNT as u16);
-        assert_eq!(view.redundancy_buffer, REDUNDANCY_BUFFER);
-        assert_eq!(view.nodes.len(), MAX_REGISTRY_NODES);
-    }
-
-    #[test]
-    fn registry_load_rejects_foreign_owner() {
-        let mut accounts = Accounts::new();
-        accounts.owner = Pubkey::new_from_array([9u8; 32]);
-        let info = accounts.registry();
-        assert_eq!(
-            RegistryAccount::load(&info, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidAccountOwner
-        );
-    }
-
-    #[test]
-    fn registry_load_rejects_wrong_discriminator() {
-        let mut accounts = Accounts::new();
-        accounts.registry_data[0] ^= 0xff;
-        let info = accounts.registry();
-        assert_eq!(
-            RegistryAccount::load(&info, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidRegistryAccount
-        );
-    }
-
-    #[test]
-    fn registry_load_rejects_short_account() {
-        let mut accounts = Accounts::new();
-        accounts.registry_data.truncate(REGISTRY_ACCOUNT_LEN - 1);
-        let info = accounts.registry();
-        assert_eq!(
-            RegistryAccount::load(&info, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidRegistryAccount
-        );
-    }
-
-    #[test]
-    fn registry_load_accepts_non_canonical_pda() {
-        // Owner/discriminator/length checked; key is not re-derived from body.
-        let mut accounts = Accounts::new();
-        accounts.registry_key = Pubkey::new_from_array([0x33u8; 32]);
-        let info = accounts.registry();
-        let registry = RegistryAccount::load(&info, &PROGRAM_ID).expect("load registry");
-        assert_eq!(*registry.key(), Pubkey::new_from_array([0x33u8; 32]));
-        assert_eq!(registry.version(), REGISTRY_VERSION);
-    }
-
-    #[test]
-    fn registry_load_accepts_tampered_bump() {
-        let mut accounts = Accounts::new();
-        let tampered_bump = accounts.registry_data[REGISTRY_BUMP_OFFSET].wrapping_sub(1);
-        accounts.registry_data[REGISTRY_BUMP_OFFSET] = tampered_bump;
-        let info = accounts.registry();
-        let registry = RegistryAccount::load(&info, &PROGRAM_ID).expect("load registry");
-        assert_eq!(registry.bump(), tampered_bump);
-    }
-
-    #[test]
-    fn registry_load_reads_version_from_body_without_pda_check() {
-        let mut accounts = Accounts::new();
-        accounts.registry_data[REGISTRY_VERSION_OFFSET..REGISTRY_VERSION_OFFSET + 4]
-            .copy_from_slice(&(REGISTRY_VERSION + 1).to_le_bytes());
-        let info = accounts.registry();
-        let registry = RegistryAccount::load(&info, &PROGRAM_ID).expect("load registry");
-        assert_eq!(registry.version(), REGISTRY_VERSION + 1);
-    }
-
-    #[test]
-    fn registry_load_accepts_appended_trailing_bytes() {
-        let mut accounts = Accounts::new();
-        accounts.registry_data.extend_from_slice(&[0u8; 16]);
-        let info = accounts.registry();
-        let registry = RegistryAccount::load(&info, &PROGRAM_ID).expect("load registry");
-        assert_eq!(registry.version(), REGISTRY_VERSION);
-    }
-
-    #[test]
-    fn registry_load_rejects_already_borrowed_data() {
-        let mut accounts = Accounts::new();
-        let info = accounts.registry();
-        let _guard = info.data.borrow_mut();
-        assert_eq!(
-            RegistryAccount::load(&info, &PROGRAM_ID).unwrap_err(),
-            AccountError::AccountBorrowFailed
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_returns_entries_in_account_order() {
-        let mut accounts = Accounts::new();
-        let infos = accounts.nodes();
-        let entries = resolve_nodes(&infos, &PROGRAM_ID).expect("resolve nodes");
-
-        let indices = signer_indices();
-        assert_eq!(entries.len(), indices.len());
-        for (entry, index) in entries.iter().zip(indices) {
-            let (x, y) = PUBKEYS[index];
-            assert_eq!(entry.account, node_pda(index).0.to_bytes());
-            assert_eq!(entry.x, x);
-            assert_eq!(entry.y, y);
-        }
-    }
-
-    #[test]
-    fn resolve_nodes_rejects_foreign_owner() {
-        let mut accounts = Accounts::new();
-        accounts.owner = Pubkey::new_from_array([9u8; 32]);
-        let infos = accounts.nodes();
-        assert_eq!(
-            resolve_nodes(&infos, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidAccountOwner
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_rejects_wrong_discriminator() {
-        let mut accounts = Accounts::new();
-        accounts.node_data[1][0] ^= 0xff;
-        let infos = accounts.nodes();
-        assert_eq!(
-            resolve_nodes(&infos, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidNodeAccount
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_rejects_registry_account_passed_as_node() {
-        let mut accounts = Accounts::new();
-        accounts.node_data[0] = registry_account_data(REGISTRY_VERSION);
-        let infos = accounts.nodes();
-        assert_eq!(
-            resolve_nodes(&infos, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidNodeAccount
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_rejects_short_account() {
-        let mut accounts = Accounts::new();
-        accounts.node_data[0].truncate(NODE_ACCOUNT_LEN - 1);
-        let infos = accounts.nodes();
-        assert_eq!(
-            resolve_nodes(&infos, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidNodeAccount
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_rejects_invalid_status_tag() {
-        let mut accounts = Accounts::new();
-        accounts.node_data[0][DISCRIMINATOR_LEN + 96] = 9;
-        let infos = accounts.nodes();
-        assert_eq!(
-            resolve_nodes(&infos, &PROGRAM_ID).unwrap_err(),
-            AccountError::InvalidNodeAccount
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_accepts_non_canonical_pda() {
-        let mut accounts = Accounts::new();
-        accounts.node_keys[2] = Pubkey::new_from_array([0x44u8; 32]);
-        let infos = accounts.nodes();
-        let entries = resolve_nodes(&infos, &PROGRAM_ID).expect("resolve nodes");
-        assert_eq!(
-            entries[2].account,
-            Pubkey::new_from_array([0x44u8; 32]).to_bytes()
-        );
-    }
-
-    #[test]
-    fn resolve_nodes_accepts_swapped_owner_field() {
-        // Owner field is not consulted during resolution.
-        let mut accounts = Accounts::new();
-        let other_owner = node_owner(1);
-        accounts.node_data[0][DISCRIMINATOR_LEN..DISCRIMINATOR_LEN + 32]
-            .copy_from_slice(&other_owner);
-        let infos = accounts.nodes();
-        assert!(resolve_nodes(&infos, &PROGRAM_ID).is_ok());
-    }
-
-    #[test]
-    fn resolve_nodes_accepts_appended_trailing_bytes() {
-        let mut accounts = Accounts::new();
-        accounts.node_data[0].extend_from_slice(&[0u8; 8]);
-        let infos = accounts.nodes();
-        assert!(resolve_nodes(&infos, &PROGRAM_ID).is_ok());
-    }
-
-    #[test]
-    fn resolve_nodes_accepts_non_active_status() {
-        let mut accounts = Accounts::new();
-        accounts.node_data[0][DISCRIMINATOR_LEN + 96] = 3; // Tombstoned
-        let infos = accounts.nodes();
-        assert!(resolve_nodes(&infos, &PROGRAM_ID).is_ok());
-    }
-
-    #[test]
-    fn node_status_max_tag_is_enforced() {
-        let mut data = node_account_data(0);
-        data[NODE_STATUS_OFFSET] = NODE_STATUS_MAX_TAG;
-        assert!(Signer::from_node_account_bytes(&data).is_ok());
-
-        data[NODE_STATUS_OFFSET] = NODE_STATUS_MAX_TAG + 1;
-        assert!(Signer::from_node_account_bytes(&data).is_err());
+        assert_eq!(registry.nodes[REGISTERED_NODE_COUNT as usize], [0u8; 32]);
     }
 
     #[test]
     fn node_account_framing_checks() {
         let full = node_account_data(3);
+        let key = node_pda(3).0;
+        let mut lamports = 1u64;
 
         for len in [0usize, 1, DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN - 1] {
-            let short = &full[..len];
-            assert!(
-                Signer::from_node_account_bytes(short).is_err(),
+            let mut short = full[..len].to_vec();
+            let info = AccountInfo::new(
+                &key,
+                false,
+                false,
+                &mut lamports,
+                &mut short,
+                &PROGRAM_ID,
+                false,
+            );
+            assert_eq!(
+                NodeEntry::load(&info).unwrap_err(),
+                AccountError::InvalidNodeAccount,
                 "truncation to {len} must be rejected",
             );
         }
 
         let mut wrong_discriminator = full.clone();
         wrong_discriminator[0] ^= 0xff;
-        assert!(Signer::from_node_account_bytes(&wrong_discriminator).is_err());
+        let info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut wrong_discriminator,
+            &PROGRAM_ID,
+            false,
+        );
+        assert_eq!(
+            NodeEntry::load(&info).unwrap_err(),
+            AccountError::InvalidNodeAccount
+        );
 
         let mut extended = full;
         extended.extend_from_slice(&[0xAB; 24]);
-        assert!(Signer::from_node_account_bytes(&extended).is_ok());
+        let info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut extended,
+            &PROGRAM_ID,
+            false,
+        );
+        NodeEntry::load(&info).expect("trailing bytes are allowed");
     }
 
     #[test]
-    fn node_status_tag_accepts_every_program_value() {
+    fn node_status_tag_is_not_consulted() {
         let mut data = node_account_data(7);
-        for tag in 0..=NODE_STATUS_MAX_TAG {
+        let key = node_pda(7).0;
+        let mut lamports = 1u64;
+        for tag in [0u8, 3, 255] {
             data[NODE_STATUS_OFFSET] = tag;
-            assert!(Signer::from_node_account_bytes(&data).is_ok(), "tag {tag}");
-        }
-        for tag in NODE_STATUS_MAX_TAG + 1..=255u8 {
-            data[NODE_STATUS_OFFSET] = tag;
-            assert!(Signer::from_node_account_bytes(&data).is_err(), "tag {tag}",);
+            let info = AccountInfo::new(
+                &key,
+                false,
+                false,
+                &mut lamports,
+                &mut data,
+                &PROGRAM_ID,
+                false,
+            );
+            NodeEntry::load(&info).unwrap_or_else(|_| panic!("status tag {tag} must not block load"));
         }
     }
 
@@ -817,7 +610,7 @@ mod tests {
     fn verify_attestation_accounts_accepts_fixture() {
         let mut accounts = Accounts::new();
         let (registry, nodes) = accounts.split();
-        verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+        verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
             .expect("account-path fixture must verify");
     }
 
@@ -826,7 +619,7 @@ mod tests {
         let mut accounts = Accounts::with_version(REGISTRY_VERSION + 1);
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
                 .unwrap_err(),
             AccountError::Attestation(AttestationError::InvalidRegistryVersion)
         );
@@ -839,7 +632,7 @@ mod tests {
         accounts.node_data.swap(0, 1);
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
                 .unwrap_err(),
             AccountError::Attestation(AttestationError::MissingSignerAccount)
         );
@@ -853,7 +646,7 @@ mod tests {
         accounts.node_lamports.pop();
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
                 .unwrap_err(),
             AccountError::Attestation(AttestationError::MissingSignerAccount)
         );
@@ -872,7 +665,7 @@ mod tests {
         };
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
                 .unwrap_err(),
             AccountError::Attestation(AttestationError::MissingSignerAccount)
         );
@@ -885,7 +678,7 @@ mod tests {
         attestation.payload.value[31] ^= 0x01;
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&attestation, &registry, &nodes, &PROGRAM_ID).unwrap_err(),
+            verify_attestation_accounts(&attestation, &registry, &nodes).unwrap_err(),
             AccountError::Attestation(AttestationError::InvalidAggregateSignature)
         );
     }
@@ -904,7 +697,6 @@ mod tests {
             &message_hash,
             REGISTRY_VERSION,
             &nodes,
-            &PROGRAM_ID,
         )
         .expect("dispute path must run"));
     }
@@ -924,7 +716,6 @@ mod tests {
             &message_hash,
             REGISTRY_VERSION,
             &nodes,
-            &PROGRAM_ID,
         )
         .expect("dispute path must run"));
     }
@@ -937,7 +728,7 @@ mod tests {
         accounts.node_data[0][0] ^= 0xff;
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
                 .unwrap_err(),
             AccountError::InvalidNodeAccount
         );
@@ -952,7 +743,7 @@ mod tests {
         accounts.node_lamports.pop();
         let (registry, nodes) = accounts.split();
         assert_eq!(
-            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes, &PROGRAM_ID)
+            verify_attestation_accounts(&fixture_attestation(), &registry, &nodes)
                 .unwrap_err(),
             AccountError::InvalidNodeAccount
         );
@@ -973,7 +764,6 @@ mod tests {
             &message_hash,
             REGISTRY_VERSION,
             &nodes,
-            &PROGRAM_ID,
         )
         .expect("invalid scalar is a verdict, not an error"));
     }
@@ -996,7 +786,6 @@ mod tests {
                 &message_hash,
                 REGISTRY_VERSION,
                 &nodes,
-                &PROGRAM_ID,
             )
             .unwrap_err(),
             AccountError::InvalidNodeAccount

@@ -89,15 +89,15 @@ molpha-verifier = "0.3"
 ### Already-resolved signers
 
 ```rust
-use molpha_verifier::{verify_attestation, Attestation, SignerXy};
+use molpha_verifier::{verify_core, Attestation, SignerXy};
 
 // `ordered_signers`: one (x, y) per set bit of `attestation.signature.signers_bitmap`,
 // in ascending bit-index order.
-verify_attestation(
+verify_core(
     &attestation,
+    &ordered_signers,
     node_count,
     redundancy_buffer,
-    &ordered_signers,
 )?;
 ```
 
@@ -116,7 +116,7 @@ verify_attestation_resolved(&attestation, &registry, &entries)?;
 
 Requires `attestation.payload.registry_version == registry.version`. The caller must owner-check and deserialize accounts; this crate binds each set bit to `registry.nodes[bit]` and runs crypto.
 
-Signer resolution alone: `resolve_registry_signers` / `resolve_registry_signers_indexed` (the indexed form also returns bit positions, useful when splitting a union bitmap).
+Signer resolution alone: `resolve_signers` / `resolve_registry_signers_indexed` (the indexed form also returns bit positions). For two overlapping bitmaps, `resolve_intersected_signers` walks the union once.
 
 ### Node key registration
 
@@ -151,7 +151,6 @@ verify_attestation_accounts(
     &attestation,
     &registry_account,       // &AccountInfo
     ctx.remaining_accounts,  // &[AccountInfo]
-    ctx.program_id,
 )?;
 ```
 
@@ -161,11 +160,10 @@ Every account is checked before any field is trusted:
 
 | Check | Registry | Node |
 | --- | --- | --- |
-| Owner is `program_id` | ✓ | ✓ |
+| Owner is Molpha `PROGRAM_ID` | ✓ | ✓ |
 | Anchor discriminator | `sha256("account:Registry")[..8]` | `sha256("account:Node")[..8]` |
-| Minimum length | `REGISTRY_ACCOUNT_LEN` (8,208) | `NODE_ACCOUNT_LEN` (168) |
-| Canonical PDA for own seeds + stored bump | `[b"molpha_registry", version_le]` | `[b"molpha_node", owner]` |
-| Body decode | fixed offsets (`zero_copy`) | fixed offsets (pubkey + status tag) |
+| Minimum length | `REGISTRY_ACCOUNT_LEN` (8,208) | `NODE_ACCOUNT_LEN` (152) |
+| Body decode | fixed offsets (`zero_copy`) | fixed offsets (pubkey `x` / `y`) |
 
 The PDA check is load-bearing rather than ceremony: the program also creates `Registry`-shaped accounts under other seed prefixes, and re-seeding from the account's *own* version / owner means a snapshot cannot be relabelled or a node identity transplanted in place. Node **status is deliberately ignored** — a node deactivated in a later version remains valid evidence for a historical snapshot.
 
@@ -175,8 +173,9 @@ Composable pieces, when the one-call form is too coarse:
 
 | Item | Role |
 | --- | --- |
-| `RegistryAccount::load` | Validated, borrowed `Registry`; `.view()` yields a `RegistryView` pointing straight at the 8 KB `nodes` array (no copy) |
-| `resolve_nodes` / `resolve_node` | Validate and decode `Node` accounts into `NodeEntry`s |
+| `RegistryView::load` | Borrowed registry snapshot; `nodes` points at the 8 KB on-account array (no copy) |
+| `NodeEntry::load` | Validate and decode one `Node` account (pubkey coordinates + account key) |
+| `resolve_signers_accounts` | Registry + signer `Node` accounts → ordered `(x, y)` pubkeys |
 
 ### Dispute path
 
@@ -187,10 +186,10 @@ use molpha_verifier::verify_aggregate_over_hash;
 
 // Ok(true) = valid, Ok(false) = invalid (slashable), Err = malformed input
 let valid = verify_aggregate_over_hash(
-    &ordered_signers,
     &signature.agg_sig_s,
     &signature.commitment,
     &message_hash,
+    &ordered_signers,
 )?;
 ```
 
@@ -201,10 +200,10 @@ let valid = verify_aggregate_over_hash(
 | `payload` | Plain `AttestationPayload`, `SchnorrSignature`, and `Attestation` structs |
 | `pop` | Canonical secp256k1 node-key validation and proof-of-possession verification |
 | `verify` | High-level verify, coalition reconstruction, dispute helpers |
-| `onchain` | Snapshot signer resolution (`resolve_registry_signers*`) over `RegistryView` / `NodeEntry` |
+| `onchain` | Snapshot signer resolution (`resolve_signers*`) over `RegistryView` / `NodeEntry` |
 | `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
 | `message` | Molpha message hash (`MOLPHA_MESSAGE_V1`) |
-| `bitmap` | u256 bitmap helpers and group sampling |
+| `bitmap` | [`Bitmap`] (256-bit set) and deterministic group sampling |
 | `coalition` | secp256k1 point sum accumulator |
 | `scalar` | Schnorr→ECDSA inputs, ETH address from pubkey |
 | `state` | Framework-agnostic snapshot view (`RegistryView`, `NodeEntry`, `MAX_REGISTRY_NODES`) |
@@ -215,7 +214,7 @@ let valid = verify_aggregate_over_hash(
 
 | Feature | Effect |
 | --- | --- |
-| *(default)* | Pure verification; no Borsh |
+| *(default)* | Enables `solana` (account adapters); implies `borsh` |
 | `borsh` | Derive Borsh on `AttestationPayload`, `SchnorrSignature`, and `Attestation` |
 | `thiserror` | `Display` and `std::error::Error` on [`AttestationError`](src/error.rs) and `NodePopError` for off-chain tooling |
 | `solana` | The [`solana` module](src/solana.rs): verify straight from `&AccountInfo`. Adds modular `solana-account-info`, `solana-program-error`, and `solana-pubkey`; implies `borsh` |

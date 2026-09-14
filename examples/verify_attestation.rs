@@ -7,8 +7,14 @@
 
 use borsh::BorshDeserialize;
 use molpha_verifier::{
-    bitmap::for_each_set_bit, compute_message_hash, fixtures, verify_attestation, Attestation,
-    AttestationError, AttestationPayload, SchnorrSignature,
+    bitmap::{Bitmap, for_each_set_bit},
+    compute_message_hash,
+    fixtures,
+    verify_core,
+    Attestation,
+    AttestationError,
+    AttestationPayload,
+    SchnorrSignature,
 };
 
 fn main() -> Result<(), AttestationError> {
@@ -53,16 +59,19 @@ fn main() -> Result<(), AttestationError> {
 
     // Ordered (x, y) pubkeys in ascending signers_bitmap bit order.
     let mut ordered_signers = Vec::new();
-    for_each_set_bit(&fixtures::SIGNERS_BITMAP, |i| {
+    for_each_set_bit(Bitmap::load(&fixtures::SIGNERS_BITMAP), |i| {
         ordered_signers.push(fixtures::PUBKEYS[i]);
-    });
+        Ok(())
+    })
+    .unwrap();
 
-    verify_attestation(
-        &attestation,
-        fixtures::REGISTERED_NODE_COUNT,
-        fixtures::REDUNDANCY_BUFFER,
-        &ordered_signers,
-    )?;
+    let registry = molpha_verifier::RegistryView {
+        version: fixtures::REGISTRY_VERSION,
+        node_count: fixtures::REGISTERED_NODE_COUNT as u16,
+        redundancy_buffer: fixtures::REDUNDANCY_BUFFER,
+        nodes: &[],
+    };
+    verify_core(&attestation, &ordered_signers, &registry)?;
 
     println!("aggregate Schnorr signature: OK");
     Ok(())

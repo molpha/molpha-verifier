@@ -7,9 +7,9 @@ use molpha_verifier::fixtures::{
     REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
 };
 use molpha_verifier::solana::{
-    verify_attestation_accounts, AccountError, RegistryAccount, DISCRIMINATOR_LEN,
-    NODE_ACCOUNT_LEN, NODE_BUMP_OFFSET, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, NODE_STATUS_OFFSET,
-    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
+    verify_attestation_accounts, AccountError, DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN,
+    NODE_BUMP_OFFSET, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, NODE_STATUS_OFFSET, PROGRAM_ID,
+    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX, RegistryView,
 };
 use molpha_verifier::{Attestation, AttestationPayload, SchnorrSignature};
 
@@ -17,17 +17,14 @@ use solana_account_info::AccountInfo;
 use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
-const PROGRAM_ID: Pubkey = Pubkey::new_from_array([7u8; 32]);
-
 const SIGNER_BITS: [usize; 7] = [3, 5, 7, 8, 9, 10, 11];
 
 fn handler(
-    program_id: &Pubkey,
     registry: &AccountInfo<'_>,
     remaining_accounts: &[AccountInfo<'_>],
     attestation: &Attestation,
 ) -> Result<(), ProgramError> {
-    verify_attestation_accounts(attestation, registry, remaining_accounts, program_id)?;
+    verify_attestation_accounts(attestation, registry, remaining_accounts)?;
     Ok(())
 }
 
@@ -156,7 +153,7 @@ impl Ledger {
 fn handler_verifies_the_evm_fixture_from_accounts() {
     let mut ledger = Ledger::new();
     let (registry, nodes) = ledger.accounts();
-    handler(&PROGRAM_ID, &registry, &nodes, &attestation()).expect("fixture must verify");
+    handler(&registry, &nodes, &attestation()).expect("fixture must verify");
 }
 
 #[test]
@@ -165,7 +162,7 @@ fn handler_surfaces_account_errors_as_program_errors() {
     ledger.owner = Pubkey::new_from_array([9u8; 32]);
     let (registry, nodes) = ledger.accounts();
 
-    let error = handler(&PROGRAM_ID, &registry, &nodes, &attestation()).unwrap_err();
+    let error = handler(&registry, &nodes, &attestation()).unwrap_err();
     assert_eq!(
         error,
         ProgramError::Custom(AccountError::InvalidAccountOwner.code())
@@ -173,19 +170,16 @@ fn handler_surfaces_account_errors_as_program_errors() {
 }
 
 #[test]
-fn registry_account_can_be_held_and_reused_across_calls() {
+fn registry_view_can_be_held_and_reused_across_calls() {
     let mut ledger = Ledger::new();
     let (registry_info, _nodes) = ledger.accounts();
-    let registry = RegistryAccount::load(&registry_info, &PROGRAM_ID).expect("load registry");
+    let registry = RegistryView::load(&registry_info).expect("load registry");
 
-    let view = registry.view();
-    assert_eq!(view.version, REGISTRY_VERSION);
-    assert_eq!(view.node_count, REGISTERED_NODE_COUNT as u16);
+    assert_eq!(registry.version, REGISTRY_VERSION);
+    assert_eq!(registry.node_count, REGISTERED_NODE_COUNT as u16);
     assert_eq!(
-        view.nodes[SIGNER_BITS[0]],
+        registry.nodes[SIGNER_BITS[0]],
         node_pda(SIGNER_BITS[0]).0.to_bytes()
     );
-
-    assert_eq!(registry.view().redundancy_buffer, REDUNDANCY_BUFFER);
-    assert_eq!(*registry.key(), registry_pda(REGISTRY_VERSION).0);
+    assert_eq!(registry.redundancy_buffer, REDUNDANCY_BUFFER);
 }

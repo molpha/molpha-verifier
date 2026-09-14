@@ -14,108 +14,127 @@ const SELECTION_DOMAIN: [u8; 32] = [
 /// Max Keccak rounds for selection sampling (bounded compute).
 const DERIVE_GROUP_BITMAP_MAX_ROUNDS: u64 = 65_536;
 
-#[inline]
-pub fn bitmap_load(bytes: &[u8; 32]) -> U256 {
-    U256::from_be_bytes(*bytes)
-}
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct Bitmap(U256);
 
-#[inline]
-pub fn bitmap_store(value: U256) -> [u8; 32] {
-    value.to_be_bytes()
-}
+impl Bitmap {
+    pub const EMPTY: Self = Self(U256::ZERO);
+    pub const FULL: Self = Self(U256::MAX);
 
-/// Bit `pos` has weight `1 << pos` (`pos == 0` is the integer LSB).
-#[inline]
-pub fn bitmap_bit_set(bitmap: &[u8; 32], pos: usize) -> bool {
-    debug_assert!(pos < 256);
-    (bitmap_load(bitmap) >> pos) & U256::from(1u8) != U256::ZERO
-}
-
-#[inline]
-pub fn bitmap_set_bit(bitmap: &mut [u8; 32], pos: usize) {
-    debug_assert!(pos < 256);
-    let mut v = bitmap_load(bitmap);
-    v |= U256::from(1u8) << pos;
-    *bitmap = bitmap_store(v);
-}
-
-#[inline]
-pub fn bitmap_clear_bit(bitmap: &mut [u8; 32], pos: usize) {
-    debug_assert!(pos < 256);
-    let mut v = bitmap_load(bitmap);
-    v &= !(U256::from(1u8) << pos);
-    *bitmap = bitmap_store(v);
-}
-
-#[inline]
-pub fn bitmap_popcount(bitmap: &[u8; 32]) -> u32 {
-    bitmap_load(bitmap).count_ones()
-}
-
-/// `sub ⊆ sup` for loaded bitmaps.
-#[inline]
-pub fn bitmap_is_subset_u256(sub: U256, sup: U256) -> bool {
-    (sub & !sup) == U256::ZERO
-}
-
-/// Reject bits set outside `[0, node_count)`.
-pub fn validate_bitmap_upper_bits_clear_u256(
-    bitmap: U256,
-    node_count: u32,
-) -> Result<(), AttestationError> {
-    if node_count > 256 {
-        return Err(AttestationError::InvalidSignersBitmap);
+    #[inline]
+    pub fn load(bytes: &[u8; 32]) -> Self {
+        Self(U256::from_be_bytes(*bytes))
     }
-    let mask = if node_count == 256 {
-        U256::MAX
-    } else {
-        (U256::from(1u8) << node_count) - U256::from(1u8)
-    };
-    if (bitmap & !mask) != U256::ZERO {
-        return Err(AttestationError::InvalidSignersBitmap);
+
+    #[inline]
+    pub fn from_limbs(limbs: [u64; 4]) -> Self {
+        let mut out = [0u8; 32];
+        for (i, limb) in limbs.iter().enumerate() {
+            let start = 24 - i * 8;
+            out[start..start + 8].copy_from_slice(&limb.to_be_bytes());
+        }
+        Self(U256::from_be_bytes(out))
     }
-    Ok(())
+
+    #[inline]
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_be_bytes()
+    }
+
+    #[inline]
+    pub fn new() -> Self {
+        Self(U256::ZERO)
+    }
+
+    #[inline]
+    pub fn bit_set(&self, pos: usize) -> bool {
+        (self.0 >> pos) & U256::from(1u8) != U256::ZERO
+    }
+
+    #[inline]
+    pub fn set_bit(&mut self, pos: usize) {
+        self.0 |= U256::from(1u8) << pos;
+    }
+
+    #[inline]
+    pub fn clear_bit(&mut self, pos: usize) {
+        self.0 &= !(U256::from(1u8) << pos);
+    }
+
+    #[inline]
+    pub fn popcount(&self) -> u32 {
+        self.0.count_ones()
+    }
+
+    #[inline]
+    pub fn is_subset(&self, other: &Self) -> bool {
+        (self.0 & !other.0) == U256::ZERO
+    }
+
+    /// Bit index of the signer at 0-based rank `pos` (ascending bit order).
+    #[inline]
+    pub fn nth_set_bit(&self, rank: usize) -> Option<usize> {
+        let mut bm = *self;
+        let mut cursor = 0usize;
+        while bm != Bitmap::EMPTY {
+            let bit_pos = bm.trailing_zeros();
+            if cursor == rank {
+                return Some(bit_pos);
+            }
+            bm.clear_bit(bit_pos);
+            cursor += 1;
+        }
+        None
+    }
+
+    #[inline]
+    pub fn validate_upper_bits_clear(&self, node_count: u32) -> Result<(), AttestationError> {
+        if node_count > 256 {
+            return Err(AttestationError::InvalidSignersBitmap);
+        }
+        let mask = if node_count == 256 {
+            U256::MAX
+        } else {
+            (U256::from(1u8) << node_count) - U256::from(1u8)
+        };
+        if (self.0 & !mask) != U256::ZERO {
+            return Err(AttestationError::InvalidSignersBitmap);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn trailing_zeros(&self) -> usize {
+        self.0.trailing_zeros() as usize
+    }
+
+    #[inline]
+    pub fn intersect(&self, other: &Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    #[inline]
+    pub fn union(&self, other: &Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn subtract(&self, other: &Self) -> Self {
+        Self(self.0 & !other.0)
+    }
 }
 
 /// Visit set bits ascending; returns the peeled bitmap (zero when fully consumed).
-pub fn for_each_set_bit_u256<F, E>(mut bm: U256, mut f: F) -> Result<U256, E>
+pub fn for_each_set_bit<F, E>(mut bm: Bitmap, mut f: F) -> Result<Bitmap, E>
 where
     F: FnMut(usize) -> Result<(), E>,
 {
-    while bm != U256::ZERO {
+    while bm != Bitmap::EMPTY {
         let bit_pos = bm.trailing_zeros() as usize;
-        bm &= bm - U256::from(1u8);
+        bm.clear_bit(bit_pos);
         f(bit_pos)?;
     }
     Ok(bm)
-}
-
-/// Bit index of the signer at 0-based rank `pos` (ascending bit order).
-pub fn get_index(bitmap: &[u8; 32], pos: usize) -> Option<usize> {
-    let mut bm = bitmap_load(bitmap);
-    let mut rank = 0usize;
-    while bm != U256::ZERO {
-        let bit_pos = bm.trailing_zeros() as usize;
-        if rank == pos {
-            return Some(bit_pos);
-        }
-        bm &= bm - U256::from(1u8);
-        rank += 1;
-    }
-    None
-}
-
-/// Iterate set bit positions in ascending order.
-pub fn for_each_set_bit<F>(bitmap: &[u8; 32], mut f: F)
-where
-    F: FnMut(usize),
-{
-    let mut bm = bitmap_load(bitmap);
-    while bm != U256::ZERO {
-        let bit_pos = bm.trailing_zeros() as usize;
-        f(bit_pos);
-        bm &= bm - U256::from(1u8);
-    }
 }
 
 /// `keccak256(seed || SELECTION_DOMAIN || counter_be)` (`counter` as big-endian `U256` word).
@@ -146,16 +165,6 @@ fn full_mask_limbs(node_count: u32) -> [u64; 4] {
         };
     }
     out
-}
-
-#[inline]
-fn limbs_to_u256(limbs: &[u64; 4]) -> U256 {
-    let mut out = [0u8; 32];
-    for (i, limb) in limbs.iter().enumerate() {
-        let start = 24 - i * 8;
-        out[start..start + 8].copy_from_slice(&limb.to_be_bytes());
-    }
-    U256::from_be_bytes(out)
 }
 
 fn sample_without_replacement(
@@ -202,28 +211,17 @@ pub fn derive_group_bitmap(
     seed: &[u8; 32],
     node_count: u32,
     group_size: u32,
-) -> Result<[u8; 32], AttestationError> {
-    Ok(bitmap_store(derive_group_bitmap_u256(
-        seed, node_count, group_size,
-    )?))
-}
-
-/// [`derive_group_bitmap`] returning `U256`.
-pub fn derive_group_bitmap_u256(
-    seed: &[u8; 32],
-    node_count: u32,
-    group_size: u32,
-) -> Result<U256, AttestationError> {
+) -> Result<Bitmap, AttestationError> {
     if node_count == 0 || node_count > 256 || group_size > node_count {
         return Err(AttestationError::GroupBitmapDerivationFailed);
     }
     if group_size == 0 {
-        return Ok(U256::ZERO);
+        return Ok(Bitmap::EMPTY);
     }
 
     let full = full_mask_limbs(node_count);
     if group_size == node_count {
-        return Ok(limbs_to_u256(&full));
+        return Ok(Bitmap::from_limbs(full));
     }
 
     // Sample the smaller of the group or its complement.
@@ -238,13 +236,7 @@ pub fn derive_group_bitmap_u256(
         sample_without_replacement(seed, node_count, group_size)?
     };
 
-    Ok(limbs_to_u256(&bitmap))
-}
-
-pub fn bitmap_is_subset(sub: &[u8; 32], sup: &[u8; 32]) -> bool {
-    let sub = bitmap_load(sub);
-    let sup = bitmap_load(sup);
-    (sub & !sup) == U256::ZERO
+    Ok(Bitmap::from_limbs(bitmap))
 }
 
 /// `min(node_count, signatures_required + redundancy_buffer)`.
@@ -259,58 +251,53 @@ pub fn effective_selection_size(
         .min(node_count)
 }
 
-pub fn validate_bitmap_upper_bits_clear(
-    bitmap: &[u8; 32],
-    node_count: u32,
-) -> Result<(), AttestationError> {
-    validate_bitmap_upper_bits_clear_u256(bitmap_load(bitmap), node_count)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn get_index_orders_signers_by_ascending_bit() {
-        let bm: [u8; 32] = [
+    fn nth_set_bit_orders_signers_by_ascending_bit() {
+        let bytes: [u8; 32] = [
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0x07,
         ];
-        assert_eq!(get_index(&bm, 0), Some(0));
-        assert_eq!(get_index(&bm, 1), Some(1));
-        assert_eq!(get_index(&bm, 2), Some(2));
-        assert_eq!(get_index(&bm, 3), None);
+        let bm = Bitmap::load(&bytes);
+        assert_eq!(bm.nth_set_bit(0), Some(0));
+        assert_eq!(bm.nth_set_bit(1), Some(1));
+        assert_eq!(bm.nth_set_bit(2), Some(2));
+        assert_eq!(bm.nth_set_bit(3), None);
     }
 
     #[test]
-    fn get_index_skips_gaps() {
-        let mut bm = [0u8; 32];
-        bitmap_set_bit(&mut bm, 5);
-        bitmap_set_bit(&mut bm, 10);
-        assert_eq!(get_index(&bm, 0), Some(5));
-        assert_eq!(get_index(&bm, 1), Some(10));
-        assert_eq!(get_index(&bm, 2), None);
+    fn nth_set_bit_skips_gaps() {
+        let mut bm = Bitmap::EMPTY;
+        bm.set_bit(5);
+        bm.set_bit(10);
+        assert_eq!(bm.nth_set_bit(0), Some(5));
+        assert_eq!(bm.nth_set_bit(1), Some(10));
+        assert_eq!(bm.nth_set_bit(2), None);
     }
 
     #[test]
-    fn validate_bitmap_upper_bits_clear_rejects_high_bits() {
-        let mut bm = [0u8; 32];
-        bitmap_set_bit(&mut bm, 10);
-        assert!(validate_bitmap_upper_bits_clear(&bm, 8).is_err());
-        assert!(validate_bitmap_upper_bits_clear(&bm, 11).is_ok());
+    fn validate_upper_bits_clear_rejects_high_bits() {
+        let mut bm = Bitmap::EMPTY;
+        bm.set_bit(10);
+        assert!(bm.validate_upper_bits_clear(8).is_err());
+        assert!(bm.validate_upper_bits_clear(11).is_ok());
     }
 
     #[test]
-    fn u256_bit_ops_match_byte_layout() {
-        let mut bm = [0u8; 32];
-        bitmap_set_bit(&mut bm, 0);
-        bitmap_set_bit(&mut bm, 7);
-        bitmap_set_bit(&mut bm, 255);
-        assert!(bitmap_bit_set(&bm, 0));
-        assert!(bitmap_bit_set(&bm, 7));
-        assert!(bitmap_bit_set(&bm, 255));
-        assert!(!bitmap_bit_set(&bm, 1));
-        assert_eq!(bitmap_popcount(&bm), 3);
+    fn bit_ops_and_popcount() {
+        let mut bm = Bitmap::EMPTY;
+        bm.set_bit(0);
+        bm.set_bit(7);
+        bm.set_bit(255);
+        assert!(bm.bit_set(0));
+        assert!(bm.bit_set(7));
+        assert!(bm.bit_set(255));
+        assert!(!bm.bit_set(1));
+        assert_eq!(bm.popcount(), 3);
+        assert_eq!(bm, Bitmap::load(&bm.to_bytes()));
     }
 
     #[test]
@@ -347,7 +334,7 @@ mod tests {
         ];
         for (node_count, group_size, want_hex) in cases {
             let got = derive_group_bitmap(&seed, *node_count, *group_size).unwrap();
-            let want = hex_to_bytes32(want_hex);
+            let want = Bitmap::load(&hex_to_bytes32(want_hex));
             assert_eq!(got, want, "n={node_count} g={group_size}");
         }
     }
@@ -359,13 +346,17 @@ mod tests {
         let group_size = 7u32;
         let direct = derive_group_bitmap(&seed, node_count, group_size).unwrap();
         let excluded = derive_group_bitmap(&seed, node_count, node_count - group_size).unwrap();
-        let mut full = [0u8; 32];
+        let mut full = Bitmap::EMPTY;
         for pos in 0..node_count as usize {
-            bitmap_set_bit(&mut full, pos);
+            full.set_bit(pos);
         }
-        let excluded_bm = bitmap_load(&excluded);
-        let complement = bitmap_store(bitmap_load(&full) ^ excluded_bm);
-        assert_eq!(direct, complement);
+        let full_bytes = full.to_bytes();
+        let excluded_bytes = excluded.to_bytes();
+        let mut complement_bytes = [0u8; 32];
+        for i in 0..32 {
+            complement_bytes[i] = full_bytes[i] ^ excluded_bytes[i];
+        }
+        assert_eq!(direct, Bitmap::load(&complement_bytes));
     }
 
     fn hex_to_bytes32(hex: &str) -> [u8; 32] {

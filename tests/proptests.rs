@@ -5,11 +5,7 @@ mod fixtures;
 use ethnum::U256;
 use libsecp256k1::PublicKey;
 use molpha_verifier::{
-    bitmap::{
-        bitmap_bit_set, bitmap_clear_bit, bitmap_is_subset, bitmap_is_subset_u256, bitmap_load,
-        bitmap_popcount, bitmap_set_bit, bitmap_store, derive_group_bitmap,
-        effective_selection_size, for_each_set_bit, validate_bitmap_upper_bits_clear,
-    },
+    bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap},
     coalition::{public_key_from_affine_xy, CoalitionAccumulator},
     message::compute_message_hash,
     payload::{AttestationPayload, SchnorrSignature},
@@ -18,7 +14,8 @@ use molpha_verifier::{
         secp256k1_scalar_reduce_be,
     },
     selection::derive_selection_bitmap,
-    verify::{reconstruct_coalition_key, SignerXy},
+    state::{RegistryView, SignerXy},
+    verify::reconstruct_coalition_key,
 };
 use num_bigint::BigUint;
 use proptest::prelude::*;
@@ -66,29 +63,27 @@ fn pubkey_to_xy(pk: &PublicKey) -> SignerXy {
     (x, y)
 }
 
-fn popcount_manual(bitmap: &[u8; 32]) -> u32 {
+fn popcount_manual(bitmap: &Bitmap) -> u32 {
     let mut count = 0u32;
-    for_each_set_bit(bitmap, |_| count += 1);
+    for_each_set_bit(*bitmap, |_| {
+        count += 1;
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap();
     count
 }
 
-fn bits_in_range(bitmap: &[u8; 32], node_count: u32) -> bool {
-    let bm = bitmap_load(bitmap);
-    let mask = if node_count == 256 {
-        U256::MAX
-    } else {
-        (U256::from(1u8) << node_count) - U256::from(1u8)
-    };
-    (bm & !mask) == U256::ZERO
+fn bits_in_range(bitmap: &Bitmap, node_count: u32) -> bool {
+    bitmap.validate_upper_bits_clear(node_count).is_ok()
 }
 
-fn full_mask_bytes(node_count: u32) -> [u8; 32] {
+fn full_mask_bitmap(node_count: u32) -> Bitmap {
     let mask = if node_count == 256 {
         U256::MAX
     } else {
         (U256::from(1u8) << node_count) - U256::from(1u8)
     };
-    bitmap_store(mask)
+    Bitmap::load(&mask.to_be_bytes())
 }
 
 fn arb_attestation_payload() -> impl Strategy<Value = AttestationPayload> {
@@ -127,22 +122,23 @@ proptest! {
 
     #[test]
     fn bitmap_store_load_roundtrip(bytes in any::<[u8; 32]>()) {
-        let loaded = bitmap_load(&bytes);
-        prop_assert_eq!(bitmap_store(loaded), bytes);
+        let loaded = Bitmap::load(&bytes);
+        prop_assert_eq!(loaded.to_bytes(), bytes);
     }
 
     #[test]
     fn bitmap_set_and_clear_bit(pos in 0usize..256) {
-        let mut bm = [0u8; 32];
-        bitmap_set_bit(&mut bm, pos);
-        prop_assert!(bitmap_bit_set(&bm, pos));
-        bitmap_clear_bit(&mut bm, pos);
-        prop_assert!(!bitmap_bit_set(&bm, pos));
+        let mut bm = Bitmap::EMPTY;
+        bm.set_bit(pos);
+        prop_assert!(bm.bit_set(pos));
+        bm.clear_bit(pos);
+        prop_assert!(!bm.bit_set(pos));
     }
 
     #[test]
     fn bitmap_popcount_matches_manual_iteration(bytes in any::<[u8; 32]>()) {
-        prop_assert_eq!(bitmap_popcount(&bytes), popcount_manual(&bytes));
+        let bm = Bitmap::load(&bytes);
+        prop_assert_eq!(bm.popcount(), popcount_manual(&bm));
     }
 
     #[test]
@@ -150,31 +146,26 @@ proptest! {
         sub in any::<[u8; 32]>(),
         sup in any::<[u8; 32]>(),
     ) {
-        let sub_u = bitmap_load(&sub);
-        let sup_u = bitmap_load(&sup);
-        prop_assert_eq!(
-            bitmap_is_subset(&sub, &sup),
-            bitmap_is_subset_u256(sub_u, sup_u),
-        );
-        prop_assert_eq!(
-            bitmap_is_subset(&sub, &sup),
-            (sub_u & !sup_u) == U256::ZERO,
-        );
+        let sub_bm = Bitmap::load(&sub);
+        let sup_bm = Bitmap::load(&sup);
+        let sub_u = U256::from_be_bytes(sub);
+        let sup_u = U256::from_be_bytes(sup);
+        prop_assert_eq!(sub_bm.is_subset(&sup_bm), (sub_u & !sup_u) == U256::ZERO);
     }
 
     #[test]
-    fn validate_bitmap_upper_bits_clear_accepts_in_range(
+    fn validate_upper_bits_clear_accepts_in_range(
         node_count in 1u32..=256,
         bits in prop::collection::btree_set(any::<usize>(), 0..32),
     ) {
-        let mut bm = [0u8; 32];
+        let mut bm = Bitmap::EMPTY;
         for &pos in &bits {
             if (pos as u32) < node_count {
-                bitmap_set_bit(&mut bm, pos);
+                bm.set_bit(pos);
             }
         }
         if bits.iter().all(|&pos| (pos as u32) < node_count) {
-            prop_assert!(validate_bitmap_upper_bits_clear(&bm, node_count).is_ok());
+            prop_assert!(bm.validate_upper_bits_clear(node_count).is_ok());
         }
     }
 
@@ -212,7 +203,7 @@ proptest! {
     ) {
         prop_assume!(group_size <= node_count);
         let bitmap = derive_group_bitmap(&seed, node_count, group_size).unwrap();
-        prop_assert_eq!(bitmap_popcount(&bitmap), group_size);
+        prop_assert_eq!(bitmap.popcount(), group_size);
         prop_assert!(bits_in_range(&bitmap, node_count));
     }
 
@@ -222,7 +213,7 @@ proptest! {
             for group_size in [0, 1, node_count / 2, node_count - 1, node_count] {
                 let bitmap = derive_group_bitmap(&seed, node_count, group_size).unwrap();
                 prop_assert_eq!(
-                    bitmap_popcount(&bitmap),
+                    bitmap.popcount(),
                     group_size,
                     "n={} g={}", node_count, group_size,
                 );
@@ -244,9 +235,14 @@ proptest! {
         let direct = derive_group_bitmap(&seed, node_count, group_size).unwrap();
         let excluded =
             derive_group_bitmap(&seed, node_count, node_count - group_size).unwrap();
-        let full = full_mask_bytes(node_count);
-        let complement = bitmap_store(bitmap_load(&full) ^ bitmap_load(&excluded));
-        prop_assert_eq!(direct, complement);
+        let full = full_mask_bitmap(node_count);
+        let full_bytes = full.to_bytes();
+        let excluded_bytes = excluded.to_bytes();
+        let mut complement_bytes = [0u8; 32];
+        for i in 0..32 {
+            complement_bytes[i] = full_bytes[i] ^ excluded_bytes[i];
+        }
+        prop_assert_eq!(direct, Bitmap::load(&complement_bytes));
     }
 
     #[test]
@@ -258,22 +254,24 @@ proptest! {
         signatures_required in any::<u8>(),
         redundancy_buffer in any::<u8>(),
     ) {
+        let registry = RegistryView {
+            version: registry_version,
+            node_count: node_count as u16,
+            redundancy_buffer,
+            nodes: &[],
+        };
         let a = derive_selection_bitmap(
             &source_id,
-            registry_version,
             canonical_timestamp,
-            node_count,
             signatures_required,
-            redundancy_buffer,
+            &registry,
         )
         .unwrap();
         let b = derive_selection_bitmap(
             &source_id,
-            registry_version,
             canonical_timestamp,
-            node_count,
             signatures_required,
-            redundancy_buffer,
+            &registry,
         )
         .unwrap();
         prop_assert_eq!(a, b);

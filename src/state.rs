@@ -6,6 +6,9 @@
 /// Maximum registry membership (signer bitmaps are 256-bit).
 pub const MAX_REGISTRY_NODES: usize = 256;
 
+/// Secp256k1 affine coordinates `(x, y)`, big-endian.
+pub type SignerXy = ([u8; 32], [u8; 32]);
+
 /// Immutable, version-addressed registry snapshot.
 ///
 /// `nodes` is borrowed so on-chain callers can pass `&registry.nodes` without copying.

@@ -2,6 +2,8 @@
 //!
 //! Field layout matches on-chain instruction args. With `borsh`, structs support wire encode/decode.
 
+use crate::compute_message_hash;
+
 /// Signed oracle attestation payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
@@ -37,6 +39,13 @@ pub struct SchnorrSignature {
 pub struct Attestation {
     pub payload: AttestationPayload,
     pub signature: SchnorrSignature,
+}
+
+impl Attestation {
+    /// Message hash the aggregate signature must verify over.
+    pub fn message_hash(&self) -> [u8; 32] {
+        compute_message_hash(&self.payload, self.signature.signers_bitmap)
+    }
 }
 
 #[cfg(all(test, feature = "borsh"))]

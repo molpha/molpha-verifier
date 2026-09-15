@@ -4,7 +4,7 @@
 
 use solana_secp256k1_recover::secp256k1_recover;
 
-use crate::bitmap::{bitmap_is_subset_u256, bitmap_load};
+use crate::bitmap::Bitmap;
 use crate::coalition::CoalitionAccumulator;
 use crate::error::AttestationError;
 use crate::message::compute_message_hash;
@@ -13,10 +13,8 @@ use crate::scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,
     secp256k1_scalar_is_valid_nonzero,
 };
-use crate::selection::derive_selection_bitmap_u256;
-
-/// Secp256k1 affine coordinates `(x, y)`, big-endian.
-pub type SignerXy = ([u8; 32], [u8; 32]);
+use crate::selection::verify_selection;
+use crate::state::{RegistryView, SignerXy};
 
 /// Verify an attestation against caller-supplied signer pubkeys.
 ///
@@ -26,70 +24,39 @@ pub type SignerXy = ([u8; 32], [u8; 32]);
 ///   This function trusts the supplied set.
 ///
 /// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
-/// (scalar → threshold → count → selection → coalition → hash → recovery); acceptance is unchanged.
-pub fn verify_attestation(
+/// (version → scalar → count → selection → coalition → hash → recovery).
+pub fn verify(
     attestation: &Attestation,
-    node_count: u32,
-    redundancy_buffer: u8,
     ordered_signers: &[SignerXy],
+    registry: &RegistryView,
 ) -> Result<(), AttestationError> {
-    verify_attestation_core(
-        attestation,
-        node_count,
-        redundancy_buffer,
-        ordered_signers.len(),
-        |coalition| accumulate_xy(ordered_signers, coalition),
-    )
-}
+    if attestation.payload.registry_version != registry.version {
+        return Err(AttestationError::InvalidRegistryVersion);
+    }
 
-pub(crate) fn verify_attestation_core<F>(
-    attestation: &Attestation,
-    node_count: u32,
-    redundancy_buffer: u8,
-    supplied_signers: usize,
-    accumulate: F,
-) -> Result<(), AttestationError>
-where
-    F: FnOnce(&mut CoalitionAccumulator) -> Result<(), AttestationError>,
-{
     let signature = &attestation.signature;
-    let payload = &attestation.payload;
 
     if !secp256k1_scalar_is_valid_nonzero(&signature.agg_sig_s) {
         return Err(AttestationError::InvalidAggregateSignature);
     }
 
-    let signers = bitmap_load(&signature.signers_bitmap);
-    let signer_count = signers.count_ones();
-    if signer_count < u32::from(payload.signatures_required) {
-        return Err(AttestationError::InsufficientSigners);
-    }
-
-    // Cheap count check before keccak-heavy selection derivation.
-    if supplied_signers != signer_count as usize {
+    let signer_count = Bitmap::load(&signature.signers_bitmap).popcount();
+    if signer_count != ordered_signers.len() as u32 {
         return Err(AttestationError::SignerCountMismatch);
     }
-    if signer_count == 0 {
-        return Err(AttestationError::InvalidSignersBitmap);
-    }
 
-    let expected_selection = derive_selection_bitmap_u256(
-        &payload.source_id,
-        payload.registry_version,
-        payload.canonical_timestamp,
-        node_count,
-        payload.signatures_required,
-        redundancy_buffer,
-    )?;
-    if !bitmap_is_subset_u256(signers, expected_selection) {
+    if !verify_selection(
+        &attestation.payload.source_id,
+        attestation.payload.canonical_timestamp,
+        attestation.payload.signatures_required,
+        registry,
+        &signature.signers_bitmap,
+    )? {
         return Err(AttestationError::SignersNotSubsetOfSelection);
     }
 
-    let mut coalition = CoalitionAccumulator::default();
-    accumulate(&mut coalition)?;
-    let x_coalition = coalition.compressed_pubkey()?;
-
-    let message_hash = compute_message_hash(payload, signature.signers_bitmap);
+    let x_coalition = reconstruct_coalition_key(ordered_signers)?;
+    let message_hash = compute_message_hash(&attestation.payload, signature.signers_bitmap);
 
     if recover_and_match(
         &x_coalition,
@@ -103,16 +70,6 @@ where
     }
 }
 
-fn accumulate_xy(
-    ordered_signers: &[SignerXy],
-    coalition: &mut CoalitionAccumulator,
-) -> Result<(), AttestationError> {
-    for (x, y) in ordered_signers {
-        coalition.add_stored_xy(x, y)?;
-    }
-    Ok(())
-}
-
 /// Reconstruct coalition key `Σ X_i` as compressed pubkey (33 bytes).
 ///
 /// Errors on an empty set or a point-at-infinity sum.
@@ -123,48 +80,24 @@ pub fn reconstruct_coalition_key(
         return Err(AttestationError::InvalidSignersBitmap);
     }
     let mut coalition = CoalitionAccumulator::default();
-    accumulate_xy(ordered_signers, &mut coalition)?;
+    for (x, y) in ordered_signers {
+        coalition.add_stored_xy(x, y)?;
+    }
     coalition.compressed_pubkey()
 }
 
 /// Verify an aggregate Schnorr signature over `message_hash` for `ordered_signers`.
-///
-/// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed input.
 pub fn verify_aggregate_over_hash(
+    agg_sig_s: &[u8; 32],
+    commitment: &[u8; 20],
+    message_hash: &[u8; 32],
     ordered_signers: &[SignerXy],
-    agg_sig_s: &[u8; 32],
-    commitment: &[u8; 20],
-    message_hash: &[u8; 32],
 ) -> Result<bool, AttestationError> {
-    verify_aggregate_over_hash_core(
-        agg_sig_s,
-        commitment,
-        message_hash,
-        ordered_signers.len(),
-        |coalition| accumulate_xy(ordered_signers, coalition),
-    )
-}
-
-/// [`verify_aggregate_over_hash`] with a folding closure over the coalition accumulator.
-pub(crate) fn verify_aggregate_over_hash_core<F>(
-    agg_sig_s: &[u8; 32],
-    commitment: &[u8; 20],
-    message_hash: &[u8; 32],
-    supplied_signers: usize,
-    accumulate: F,
-) -> Result<bool, AttestationError>
-where
-    F: FnOnce(&mut CoalitionAccumulator) -> Result<(), AttestationError>,
-{
     if !secp256k1_scalar_is_valid_nonzero(agg_sig_s) {
         return Ok(false);
     }
-    if supplied_signers == 0 {
-        return Err(AttestationError::InvalidSignersBitmap);
-    }
-    let mut coalition = CoalitionAccumulator::default();
-    accumulate(&mut coalition)?;
-    let x_coalition = coalition.compressed_pubkey()?;
+
+    let x_coalition = reconstruct_coalition_key(ordered_signers)?;
     Ok(recover_and_match(
         &x_coalition,
         message_hash,
@@ -203,11 +136,13 @@ mod tests {
     use libsecp256k1::PublicKey;
 
     fn fixture_signers_xy() -> Vec<SignerXy> {
-        use crate::bitmap::for_each_set_bit;
+        use crate::bitmap::{for_each_set_bit, Bitmap};
         let mut signers = Vec::new();
-        for_each_set_bit(&SIGNERS_BITMAP, |i| {
+        for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |i| {
             signers.push(PUBKEYS[i]);
-        });
+            Ok::<(), AttestationError>(())
+        })
+        .unwrap();
         signers
     }
 
@@ -222,8 +157,8 @@ mod tests {
 
     #[test]
     fn fixture_signers_bitmap_popcount_meets_threshold() {
-        use crate::bitmap::bitmap_popcount;
-        let popcount = bitmap_popcount(&SIGNERS_BITMAP);
+        use crate::bitmap::Bitmap;
+        let popcount = Bitmap::load(&SIGNERS_BITMAP).popcount();
         assert_eq!(popcount, SIGNER_COUNT);
         assert!(popcount >= u32::from(SIGNATURES_REQUIRED));
     }
@@ -258,28 +193,27 @@ mod tests {
         }
     }
 
+    fn fixture_registry() -> RegistryView<'static> {
+        RegistryView {
+            version: REGISTRY_VERSION,
+            node_count: REGISTERED_NODE_COUNT as u16,
+            redundancy_buffer: REDUNDANCY_BUFFER,
+            nodes: &[],
+        }
+    }
+
     #[test]
     fn verify_attestation_accepts_fixture() {
         let attestation = fixture_attestation();
-        verify_attestation(
-            &attestation,
-            REGISTERED_NODE_COUNT,
-            REDUNDANCY_BUFFER,
-            &fixture_signers_xy(),
-        )
-        .expect("fixture attestation must verify");
+        verify(&attestation, &fixture_signers_xy(), &fixture_registry())
+            .expect("fixture attestation must verify");
     }
 
     #[test]
     fn tampered_s_fails_verification() {
         let mut attestation = fixture_attestation();
         attestation.signature.agg_sig_s[31] ^= 0x01;
-        let res = verify_attestation(
-            &attestation,
-            REGISTERED_NODE_COUNT,
-            REDUNDANCY_BUFFER,
-            &fixture_signers_xy(),
-        );
+        let res = verify(&attestation, &fixture_signers_xy(), &fixture_registry());
         assert_eq!(res, Err(AttestationError::InvalidAggregateSignature));
     }
 
@@ -289,13 +223,19 @@ mod tests {
         let mut signers = fixture_signers_xy();
         signers.pop();
         assert_eq!(
-            verify_attestation(
-                &attestation,
-                REGISTERED_NODE_COUNT,
-                REDUNDANCY_BUFFER,
-                &signers,
-            ),
+            verify(&attestation, &signers, &fixture_registry()),
             Err(AttestationError::SignerCountMismatch)
+        );
+    }
+
+    #[test]
+    fn wrong_registry_version_is_rejected() {
+        let attestation = fixture_attestation();
+        let mut registry = fixture_registry();
+        registry.version = REGISTRY_VERSION + 1;
+        assert_eq!(
+            verify(&attestation, &fixture_signers_xy(), &registry),
+            Err(AttestationError::InvalidRegistryVersion)
         );
     }
 
@@ -306,20 +246,20 @@ mod tests {
         let message_hash =
             compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);
         assert!(verify_aggregate_over_hash(
-            &signers,
             &attestation.signature.agg_sig_s,
             &attestation.signature.commitment,
             &message_hash,
+            &fixture_signers_xy(),
         )
         .unwrap());
 
         let mut bad_hash = message_hash;
         bad_hash[0] ^= 0xff;
         assert!(!verify_aggregate_over_hash(
-            &signers,
             &attestation.signature.agg_sig_s,
             &attestation.signature.commitment,
             &bad_hash,
+            &signers,
         )
         .unwrap());
     }

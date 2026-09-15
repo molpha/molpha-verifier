@@ -5,6 +5,7 @@
 
 use molpha_verifier::bitmap::derive_group_bitmap;
 use molpha_verifier::selection::derive_selection_bitmap;
+use molpha_verifier::RegistryView;
 use sha2::{Digest, Sha256};
 
 fn sweep_seed(i: u32) -> [u8; 32] {
@@ -24,7 +25,7 @@ fn derive_group_bitmap_sweep_digest_is_stable() {
             for group_size in 0u32..=node_count {
                 let got = derive_group_bitmap(&seed, node_count, group_size)
                     .expect("valid parameters must derive");
-                hasher.update(got);
+                hasher.update(got.to_bytes());
                 count += 1;
             }
         }
@@ -48,16 +49,20 @@ fn derive_selection_bitmap_sweep_digest_is_stable() {
         for node_count in [1u32, 2, 3, 7, 12, 31, 32, 33, 64, 100, 128, 200, 255, 256] {
             for signatures_required in [0u8, 1, 5, 17, 64, 200, 255] {
                 for redundancy_buffer in [0u8, 2, 9, 128, 255] {
+                    let registry = RegistryView {
+                        version: registry_version,
+                        node_count: node_count as u16,
+                        redundancy_buffer,
+                        nodes: &[],
+                    };
                     let got = derive_selection_bitmap(
                         &source_id,
-                        registry_version,
                         canonical_timestamp,
-                        node_count,
                         signatures_required,
-                        redundancy_buffer,
+                        &registry,
                     )
                     .expect("valid parameters must derive");
-                    hasher.update(got);
+                    hasher.update(got.to_bytes());
                 }
             }
         }

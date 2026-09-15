@@ -32,7 +32,7 @@ pub fn resolve_signers(
 
     let mut cursor = 0usize;
     for_each_set_bit(signers, |bit_pos| {
-        if bit_pos >= registry.node_count as usize {
+        if bit_pos >= registry.node_count as usize || bit_pos >= registry.nodes.len() {
             return Err(AttestationError::InvalidSignersBitmap);
         }
 
@@ -71,7 +71,7 @@ pub fn resolve_intersected_signers(
     let mut ordered_b = Vec::with_capacity(intersected.popcount() as usize);
 
     for_each_set_bit(unioned, |bit_pos| {
-        if bit_pos >= registry.node_count as usize {
+        if bit_pos >= registry.node_count as usize || bit_pos >= registry.nodes.len() {
             return Err(AttestationError::InvalidSignersBitmap);
         }
 
@@ -231,6 +231,34 @@ mod tests {
         }];
 
         let err = resolve_signers(&entries, &registry, &signers_bitmap).unwrap_err();
+        assert_eq!(err, AttestationError::InvalidSignersBitmap);
+    }
+
+    #[test]
+    fn resolve_rejects_bit_beyond_supplied_nodes_slice() {
+        let nodes_array = [[1u8; 32]; 1];
+        let registry = RegistryView {
+            version: 0,
+            node_count: 4,
+            redundancy_buffer: 0,
+            nodes: &nodes_array,
+        };
+        let mut bm = Bitmap::EMPTY;
+        bm.set_bit(2);
+        let signers_bitmap = bm.to_bytes();
+
+        let entries = [NodeEntry {
+            account: [1u8; 32],
+            x: [2u8; 32],
+            y: [3u8; 32],
+        }];
+
+        let err = resolve_signers(&entries, &registry, &signers_bitmap).unwrap_err();
+        assert_eq!(err, AttestationError::InvalidSignersBitmap);
+
+        let err =
+            resolve_intersected_signers(&entries, &registry, &signers_bitmap, &signers_bitmap)
+                .unwrap_err();
         assert_eq!(err, AttestationError::InvalidSignersBitmap);
     }
 

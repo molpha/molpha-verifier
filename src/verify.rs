@@ -24,12 +24,16 @@ use crate::state::{RegistryView, SignerXy};
 ///   This function trusts the supplied set.
 ///
 /// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
-/// (scalar → threshold → count → selection → coalition → hash → recovery); acceptance is unchanged.
+/// (version → scalar → count → selection → coalition → hash → recovery).
 pub fn verify(
     attestation: &Attestation,
     ordered_signers: &[SignerXy],
     registry: &RegistryView,
 ) -> Result<(), AttestationError> {
+    if attestation.payload.registry_version != registry.version {
+        return Err(AttestationError::InvalidRegistryVersion);
+    }
+
     let signature = &attestation.signature;
 
     if !secp256k1_scalar_is_valid_nonzero(&signature.agg_sig_s) {
@@ -221,6 +225,17 @@ mod tests {
         assert_eq!(
             verify(&attestation, &signers, &fixture_registry()),
             Err(AttestationError::SignerCountMismatch)
+        );
+    }
+
+    #[test]
+    fn wrong_registry_version_is_rejected() {
+        let attestation = fixture_attestation();
+        let mut registry = fixture_registry();
+        registry.version = REGISTRY_VERSION + 1;
+        assert_eq!(
+            verify(&attestation, &fixture_signers_xy(), &registry),
+            Err(AttestationError::InvalidRegistryVersion)
         );
     }
 

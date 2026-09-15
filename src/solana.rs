@@ -159,8 +159,15 @@ impl From<AccountError> for ProgramError {
     }
 }
 
-impl RegistryView<'_> {
-    pub fn load(account: &AccountInfo<'_>) -> Result<Self, AccountError> {
+/// Validated, borrowed `Registry` account (holds the data borrow for zero-copy `nodes`).
+pub struct RegistryAccount<'a> {
+    key: Pubkey,
+    data: Ref<'a, [u8]>,
+}
+
+impl<'a> RegistryAccount<'a> {
+    /// Borrow and validate a `Registry` account (owner / discriminator / length).
+    pub fn load(account: &'a AccountInfo<'_>) -> Result<Self, AccountError> {
         if *account.owner != PROGRAM_ID {
             return Err(AccountError::InvalidAccountOwner);
         }
@@ -174,37 +181,78 @@ impl RegistryView<'_> {
             return Err(AccountError::InvalidRegistryAccount);
         }
 
-        let version = u32::from_le_bytes(
-            data[REGISTRY_VERSION_OFFSET..REGISTRY_VERSION_OFFSET + 4]
+        Ok(Self {
+            key: *account.key,
+            data,
+        })
+    }
+
+    pub fn key(&self) -> &Pubkey {
+        &self.key
+    }
+
+    pub fn version(&self) -> u32 {
+        u32::from_le_bytes(
+            self.data[REGISTRY_VERSION_OFFSET..REGISTRY_VERSION_OFFSET + 4]
                 .try_into()
-                .map_err(|_| AccountError::InvalidRegistryAccount)?,
-        );
+                .expect("length checked in load"),
+        )
+    }
 
-        let node_count = u16::from_le_bytes(
-            data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
+    pub fn node_count(&self) -> u16 {
+        u16::from_le_bytes(
+            self.data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
                 .try_into()
-                .map_err(|_| AccountError::InvalidRegistryAccount)?,
-        );
+                .expect("length checked in load"),
+        )
+    }
 
-        let redundancy_buffer = data[REGISTRY_REDUNDANCY_BUFFER_OFFSET];
+    pub fn redundancy_buffer(&self) -> u8 {
+        self.data[REGISTRY_REDUNDANCY_BUFFER_OFFSET]
+    }
 
-        let node_bytes = &data[REGISTRY_NODES_OFFSET..REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN];
-        let nodes = unsafe {
-            core::slice::from_raw_parts(node_bytes.as_ptr().cast::<[u8; 32]>(), MAX_REGISTRY_NODES)
-        };
+    pub fn bump(&self) -> u8 {
+        self.data[REGISTRY_BUMP_OFFSET]
+    }
 
-        let view = Self {
-            version,
-            node_count,
-            redundancy_buffer,
-            nodes,
-        };
+    pub fn bytes(&self) -> &[u8] {
+        &self.data
+    }
 
-        Ok(view)
+    /// Full ordered node-address array; only `[..node_count()]` is populated.
+    pub fn nodes(&self) -> &[[u8; 32]] {
+        let bytes = &self.data[REGISTRY_NODES_OFFSET..REGISTRY_NODES_OFFSET + REGISTRY_NODES_LEN];
+        // SAFETY: `bytes` is exactly `MAX_REGISTRY_NODES * 32` (bounds checked in `load`).
+        // `[u8; 32]` has alignment 1; returned slice borrows `self` with the data guard.
+        unsafe {
+            core::slice::from_raw_parts(bytes.as_ptr().cast::<[u8; 32]>(), MAX_REGISTRY_NODES)
+        }
     }
 
     pub fn node_key(&self, index: usize) -> Result<Pubkey, AccountError> {
-        Ok(Pubkey::new_from_array(self.nodes[index]))
+        Ok(Pubkey::new_from_array(self.nodes()[index]))
+    }
+
+    /// Framework-agnostic view for resolution / verification.
+    pub fn view(&self) -> RegistryView<'_> {
+        RegistryView {
+            version: self.version(),
+            node_count: self.node_count(),
+            redundancy_buffer: self.redundancy_buffer(),
+            nodes: self.nodes(),
+        }
+    }
+}
+
+impl core::fmt::Debug for RegistryAccount<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RegistryAccount")
+            .field("key", &self.key)
+            .field("version", &self.version())
+            .field("node_count", &self.node_count())
+            .field("redundancy_buffer", &self.redundancy_buffer())
+            .field("bump", &self.bump())
+            .finish_non_exhaustive()
     }
 }
 
@@ -247,8 +295,8 @@ pub fn resolve_signers_accounts(
     registry_account: &AccountInfo<'_>,
     signers_bitmap: &[u8; 32],
 ) -> Result<Vec<SignerXy>, AccountError> {
-    let registry = RegistryView::load(registry_account)?;
-    resolve_signers_accounts_core(accounts, &registry, signers_bitmap)
+    let registry = RegistryAccount::load(registry_account)?;
+    resolve_signers_accounts_core(accounts, &registry.view(), signers_bitmap)
 }
 
 pub fn resolve_intersected_signers_accounts(
@@ -257,13 +305,14 @@ pub fn resolve_intersected_signers_accounts(
     bitmap_a: &[u8; 32],
     bitmap_b: &[u8; 32],
 ) -> Result<IntersectedResolution, AccountError> {
-    let registry = RegistryView::load(registry_account)?;
+    let registry = RegistryAccount::load(registry_account)?;
+    let view = registry.view();
     let nodes = accounts
         .iter()
         .map(|account| NodeEntry::load(account))
         .collect::<Result<Vec<NodeEntry>, AccountError>>()?;
     Ok(resolve_intersected_signers(
-        &nodes, &registry, bitmap_a, bitmap_b,
+        &nodes, &view, bitmap_a, bitmap_b,
     )?)
 }
 
@@ -286,21 +335,19 @@ pub fn verify_attestation(
     registry_account: &AccountInfo<'_>,
     node_accounts: &[AccountInfo<'_>],
 ) -> Result<(), AccountError> {
-    let registry = RegistryView::load(registry_account)?;
+    let registry = RegistryAccount::load(registry_account)?;
+    let view = registry.view();
 
-    let ordered_signers = resolve_signers_accounts_core(
-        node_accounts,
-        &registry,
-        &attestation.signature.signers_bitmap,
-    )?;
+    let ordered_signers =
+        resolve_signers_accounts_core(node_accounts, &view, &attestation.signature.signers_bitmap)?;
 
-    if attestation.payload.registry_version != registry.version {
+    if attestation.payload.registry_version != view.version {
         return Err(AccountError::Attestation(
             AttestationError::InvalidRegistryVersion,
         ));
     }
 
-    Ok(verify(attestation, &ordered_signers, &registry)?)
+    Ok(verify(attestation, &ordered_signers, &view)?)
 }
 
 /// Verify an aggregate over an arbitrary message hash from accounts (dispute / slash).
@@ -314,12 +361,13 @@ pub fn verify_aggregate_over_hash_accounts(
     registry_version: u32,
     node_accounts: &[AccountInfo<'_>],
 ) -> Result<bool, AccountError> {
-    let registry = RegistryView::load(registry_account)?;
-    if registry.version != registry_version {
+    let registry = RegistryAccount::load(registry_account)?;
+    let view = registry.view();
+    if view.version != registry_version {
         return Err(AccountError::InvalidRegistryAccount);
     }
     let ordered_signers =
-        resolve_signers_accounts_core(node_accounts, &registry, &signature.signers_bitmap)?;
+        resolve_signers_accounts_core(node_accounts, &view, &signature.signers_bitmap)?;
     Ok(verify_aggregate_over_hash(
         &signature.agg_sig_s,
         &signature.commitment,
@@ -513,15 +561,16 @@ mod tests {
     fn nodes_slice_matches_raw_account_bytes() {
         let mut accounts = Accounts::new();
         let info = accounts.registry();
-        let registry = RegistryView::load(&info).expect("load registry");
-        let data = info.try_borrow_data().expect("borrow registry data");
+        let registry = RegistryAccount::load(&info).expect("load registry");
+        let view = registry.view();
+        let data = registry.bytes();
 
-        assert_eq!(registry.nodes.len(), MAX_REGISTRY_NODES);
-        for (index, node) in registry.nodes.iter().enumerate() {
+        assert_eq!(view.nodes.len(), MAX_REGISTRY_NODES);
+        for (index, node) in view.nodes.iter().enumerate() {
             let offset = REGISTRY_NODES_OFFSET + index * 32;
             assert_eq!(&node[..], &data[offset..offset + 32]);
         }
-        for (index, node) in registry
+        for (index, node) in view
             .nodes
             .iter()
             .enumerate()
@@ -529,7 +578,7 @@ mod tests {
         {
             assert_eq!(*node, node_pda(index).0.to_bytes());
         }
-        assert_eq!(registry.nodes[REGISTERED_NODE_COUNT as usize], [0u8; 32]);
+        assert_eq!(view.nodes[REGISTERED_NODE_COUNT as usize], [0u8; 32]);
     }
 
     #[test]

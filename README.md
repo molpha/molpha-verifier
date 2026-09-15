@@ -173,7 +173,7 @@ Composable pieces, when the one-call form is too coarse:
 
 | Item | Role |
 | --- | --- |
-| `RegistryView::load` | Borrowed registry snapshot; `nodes` points at the 8 KB on-account array (no copy) |
+| `RegistryAccount::load` | Borrowed registry account; `view()` exposes a zero-copy `RegistryView` tied to the borrow |
 | `NodeEntry::load` | Validate and decode one `Node` account (pubkey coordinates + account key) |
 | `resolve_signers_accounts` | Registry + signer `Node` accounts → ordered `(x, y)` pubkeys |
 

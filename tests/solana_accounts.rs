@@ -7,11 +7,11 @@ use molpha_verifier::fixtures::{
     REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
 };
 use molpha_verifier::solana::{
-    verify_attestation, AccountError, DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN, NODE_BUMP_OFFSET,
-    NODE_DISCRIMINATOR, NODE_SEED_PREFIX, NODE_STATUS_OFFSET, PROGRAM_ID, REGISTRY_ACCOUNT_LEN,
-    REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
+    verify_attestation, AccountError, RegistryAccount, DISCRIMINATOR_LEN, NODE_ACCOUNT_LEN,
+    NODE_BUMP_OFFSET, NODE_DISCRIMINATOR, NODE_SEED_PREFIX, NODE_STATUS_OFFSET, PROGRAM_ID,
+    REGISTRY_ACCOUNT_LEN, REGISTRY_DISCRIMINATOR, REGISTRY_SEED_PREFIX,
 };
-use molpha_verifier::{Attestation, AttestationPayload, RegistryView, SchnorrSignature};
+use molpha_verifier::{Attestation, AttestationPayload, SchnorrSignature};
 
 use solana_account_info::AccountInfo;
 use solana_program_error::ProgramError;
@@ -173,13 +173,14 @@ fn handler_surfaces_account_errors_as_program_errors() {
 fn registry_view_can_be_held_and_reused_across_calls() {
     let mut ledger = Ledger::new();
     let (registry_info, _nodes) = ledger.accounts();
-    let registry = RegistryView::load(&registry_info).expect("load registry");
+    let registry = RegistryAccount::load(&registry_info).expect("load registry");
+    let view = registry.view();
 
-    assert_eq!(registry.version, REGISTRY_VERSION);
-    assert_eq!(registry.node_count, REGISTERED_NODE_COUNT as u16);
+    assert_eq!(view.version, REGISTRY_VERSION);
+    assert_eq!(view.node_count, REGISTERED_NODE_COUNT as u16);
     assert_eq!(
-        registry.nodes[SIGNER_BITS[0]],
+        view.nodes[SIGNER_BITS[0]],
         node_pda(SIGNER_BITS[0]).0.to_bytes()
     );
-    assert_eq!(registry.redundancy_buffer, REDUNDANCY_BUFFER);
+    assert_eq!(view.redundancy_buffer, REDUNDANCY_BUFFER);
 }

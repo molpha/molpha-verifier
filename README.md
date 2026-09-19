@@ -82,6 +82,9 @@ molpha-verifier = "0.3"
 
 # On Solana, to pass accounts instead of plain data:
 # molpha-verifier = { version = "0.3", features = ["solana"] }
+
+# In an Anchor 1.2 program, with instruction-type and error integration:
+# molpha-verifier = { version = "0.3", features = ["anchor"] }
 ```
 
 ## Usage
@@ -89,16 +92,17 @@ molpha-verifier = "0.3"
 ### Already-resolved signers
 
 ```rust
-use molpha_verifier::{verify_core, Attestation, SignerXy};
+use molpha_verifier::{verify, Attestation, RegistryView, SignerXy};
 
 // `ordered_signers`: one (x, y) per set bit of `attestation.signature.signers_bitmap`,
 // in ascending bit-index order.
-verify_core(
-    &attestation,
-    &ordered_signers,
+let registry = RegistryView {
+    version: attestation.payload.registry_version,
     node_count,
     redundancy_buffer,
-)?;
+    nodes: &[],
+};
+verify(&attestation, &ordered_signers, &registry)?;
 ```
 
 ### Registry-resolved path
@@ -144,10 +148,10 @@ let (pubkey_x, pubkey_y) = validate_key_and_verify_pop(
 With the `solana` feature the crate reads the accounts itself — hand it the `Registry` account and the signers' `Node` accounts and it does the rest:
 
 ```rust
-use molpha_verifier::solana::verify_attestation_accounts;
+use molpha_verifier::solana::verify_attestation;
 
 // `node_accounts` are the signers' Node accounts in ascending signers_bitmap bit order.
-verify_attestation_accounts(
+verify_attestation(
     &attestation,
     &registry_account,       // &AccountInfo
     ctx.remaining_accounts,  // &[AccountInfo]
@@ -168,6 +172,40 @@ Every account is checked before any field is trusted:
 The PDA check is load-bearing rather than ceremony: the program also creates `Registry`-shaped accounts under other seed prefixes, and re-seeding from the account's *own* version / owner means a snapshot cannot be relabelled or a node identity transplanted in place. Node **status is deliberately ignored** — a node deactivated in a later version remains valid evidence for a historical snapshot.
 
 Errors come back as [`solana::AccountError`](src/solana.rs), which wraps `AttestationError` so one `?` covers both account I/O and crypto. `From<AccountError> for ProgramError` maps to `ProgramError::Custom(ERROR_CODE_BASE + n)`, based at `0x4D4F_0000` — outside Anchor's reserved *and* `6000+` user ranges, so it never collides with a consumer's own codes.
+
+### Anchor integration (`anchor` feature)
+
+The `anchor` feature includes the `solana` adapters and makes `AttestationPayload`,
+`SchnorrSignature`, and `Attestation` directly usable as Anchor instruction types. It also
+converts `AccountError` into Anchor's error type while preserving the verifier's stable custom
+program-error codes:
+
+```rust
+use anchor_lang::prelude::*;
+use molpha_verifier::{solana::verify_attestation, Attestation};
+
+pub fn submit(ctx: Context<Submit>, attestation: Attestation) -> Result<()> {
+    verify_attestation(
+        &attestation,
+        ctx.accounts.registry.as_ref(),
+        ctx.remaining_accounts,
+    )?;
+    Ok(())
+}
+```
+
+To include these types in a consuming program's generated IDL, forward its `idl-build` feature:
+
+```toml
+[features]
+idl-build = [
+    "anchor-lang/idl-build",
+    "molpha-verifier/idl-build",
+]
+```
+
+Consumers that want errors named in their own IDL can continue mapping `AccountError` into their
+program's `#[error_code]` enum instead of using the direct conversion.
 
 Composable pieces, when the one-call form is too coarse:
 
@@ -214,16 +252,19 @@ let valid = verify_aggregate_over_hash(
 
 | Feature | Effect |
 | --- | --- |
-| *(default)* | Enables `solana` (account adapters); implies `borsh` |
+| *(default)* | Pure verification; no Borsh, Solana account, or Anchor dependency |
 | `borsh` | Derive Borsh on `AttestationPayload`, `SchnorrSignature`, and `Attestation` |
 | `thiserror` | `Display` and `std::error::Error` on [`AttestationError`](src/error.rs) and `NodePopError` for off-chain tooling |
 | `solana` | The [`solana` module](src/solana.rs): verify straight from `&AccountInfo`. Adds modular `solana-account-info`, `solana-program-error`, and `solana-pubkey`; implies `borsh` |
+| `anchor` | Anchor 1.2 serialization and error integration; implies `solana` |
+| `idl-build` | Adds verifier attestation types to consuming Anchor IDLs; implies `anchor` |
 
 ## Development
 
 ```bash
 cargo test
 cargo test --features solana
+cargo test --features anchor
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check

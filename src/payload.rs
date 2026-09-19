@@ -1,14 +1,19 @@
 //! Attestation payload and signature structs.
 //!
 //! Field layout matches on-chain instruction args. With `borsh`, structs support wire encode/decode.
+//! With `anchor`, the same structs can be used directly in Anchor instruction arguments.
 
 use crate::compute_message_hash;
 
 /// Signed oracle attestation payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
-    feature = "borsh",
+    all(feature = "borsh", not(feature = "anchor")),
     derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
+#[cfg_attr(
+    feature = "anchor",
+    derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)
 )]
 pub struct AttestationPayload {
     pub value: [u8; 32],
@@ -21,8 +26,12 @@ pub struct AttestationPayload {
 /// Aggregate Schnorr signature material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
-    feature = "borsh",
+    all(feature = "borsh", not(feature = "anchor")),
     derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
+#[cfg_attr(
+    feature = "anchor",
+    derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)
 )]
 pub struct SchnorrSignature {
     pub agg_sig_s: [u8; 32],
@@ -33,8 +42,12 @@ pub struct SchnorrSignature {
 /// Payload plus aggregate Schnorr signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
-    feature = "borsh",
+    all(feature = "borsh", not(feature = "anchor")),
     derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
+#[cfg_attr(
+    feature = "anchor",
+    derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)
 )]
 pub struct Attestation {
     pub payload: AttestationPayload,
@@ -86,5 +99,59 @@ mod tests {
         let encoded = borsh::to_vec(&attestation).expect("encode attestation");
         let decoded = Attestation::try_from_slice(&encoded).expect("decode attestation");
         assert_eq!(decoded, attestation);
+    }
+
+    #[cfg(feature = "anchor")]
+    #[test]
+    fn attestation_types_implement_anchor_serialization() {
+        fn assert_anchor_traits<
+            T: anchor_lang::AnchorSerialize + anchor_lang::AnchorDeserialize,
+        >() {
+        }
+
+        assert_anchor_traits::<AttestationPayload>();
+        assert_anchor_traits::<SchnorrSignature>();
+        assert_anchor_traits::<Attestation>();
+    }
+
+    #[cfg(feature = "idl-build")]
+    #[test]
+    fn anchor_idl_includes_attestation_and_nested_types() {
+        use anchor_lang::idl::types::{IdlDefinedFields, IdlType, IdlTypeDefTy};
+        use anchor_lang::IdlBuild;
+        use std::collections::BTreeMap;
+
+        let definition = Attestation::create_type().expect("Attestation IDL definition");
+        assert!(definition.name.ends_with("Attestation"));
+
+        let IdlTypeDefTy::Struct {
+            fields: Some(IdlDefinedFields::Named(fields)),
+        } = definition.ty
+        else {
+            panic!("Attestation must be an IDL struct with named fields");
+        };
+
+        let defined_field_names = fields
+            .iter()
+            .filter_map(|field| match &field.ty {
+                IdlType::Defined { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(defined_field_names
+            .iter()
+            .any(|name| name.ends_with("AttestationPayload")));
+        assert!(defined_field_names
+            .iter()
+            .any(|name| name.ends_with("SchnorrSignature")));
+
+        let mut nested = BTreeMap::new();
+        Attestation::insert_types(&mut nested);
+        assert!(nested
+            .values()
+            .any(|definition| definition.name.ends_with("AttestationPayload")));
+        assert!(nested
+            .values()
+            .any(|definition| definition.name.ends_with("SchnorrSignature")));
     }
 }

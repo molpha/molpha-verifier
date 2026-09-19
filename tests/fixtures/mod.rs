@@ -1,7 +1,6 @@
-//! Shared 12-node registry compatibility fixture.
-//!
-//! Seven signers at bits 3, 5, 7, 8, 9, 10, 11 (`signersBitmap = 4008`).
-#![allow(dead_code)]
+// Shared 12-node registry compatibility fixture.
+//
+// Seven signers at bits 3, 5, 7, 8, 9, 10, 11 (`signersBitmap = 4008`).
 
 pub const REGISTERED_NODE_COUNT: u32 = 12;
 pub const REGISTRY_VERSION: u32 = 12;

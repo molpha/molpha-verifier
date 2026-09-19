@@ -2,25 +2,31 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //!
 //! Framework-agnostic: the caller owns registry account types and passes plain data.
-//! Verify via [`verify_core`] (resolved pubkeys) or [`verify_attestation_resolved`]
+//! Verify via [`verify()`] (resolved pubkeys) or [`verify_attestation_resolved`]
 //! ([`RegistryView`] + [`NodeEntry`]s). [`resolve_signers`] binds each set bit of the signers
 //! bitmap to `registry.nodes[bit]`.
 //!
 //! With the `solana` feature, [`solana`] accepts `&AccountInfo` and performs owner /
 //! discriminator / length checks before verifying.
+//! With the `anchor` feature, attestation types implement Anchor serialization and account
+//! adapter errors convert directly into `anchor_lang::error::Error`.
 //!
 //! # Usage
 //! ```ignore
-//! use molpha_verifier::{verify_core, Attestation};
+//! use molpha_verifier::{verify, Attestation};
 //!
 //! // `ordered_signers`: (x, y) pubkeys in ascending signers_bitmap bit order.
-//! verify_core(&attestation, &ordered_signers, &registry)?;
+//! verify(&attestation, &ordered_signers, &registry)?;
 //! ```
 
 #[doc(hidden)]
 #[cfg(any(test, feature = "fixtures"))]
-#[path = "../tests/fixtures/mod.rs"]
-pub mod fixtures;
+#[allow(dead_code)]
+pub mod fixtures {
+    // Keep this module inline so Anchor's IDL source parser does not try to resolve the
+    // test-only fixture as a conventional `src/fixtures.rs` module.
+    include!("../tests/fixtures/mod.rs");
+}
 
 pub mod bitmap;
 pub mod coalition;

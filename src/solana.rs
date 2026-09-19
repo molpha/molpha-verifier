@@ -1,8 +1,8 @@
 //! Solana account adapters — verify from `&[AccountInfo]`.
 //!
 //! Opt-in (`solana` feature): validates Molpha `Registry` / `Node` accounts and calls
-//! [`verify_attestation_resolved`]. Reads Anchor layouts (8-byte discriminator + body) without
-//! depending on `anchor-lang`.
+//! [`crate::verify_attestation_resolved`]. Reads Anchor layouts (8-byte discriminator + body)
+//! without depending on `anchor-lang`.
 //!
 //! # Checks
 //!
@@ -19,10 +19,10 @@
 //!
 //! # Usage
 //! ```ignore
-//! use molpha_verifier::solana::verify_attestation_accounts;
+//! use molpha_verifier::solana::verify_attestation;
 //!
 //! // `node_accounts`: signer Node accounts in ascending signers_bitmap bit order.
-//! verify_attestation_accounts(
+//! verify_attestation(
 //!     &attestation,
 //!     &registry_account,
 //!     ctx.remaining_accounts,
@@ -156,6 +156,14 @@ impl From<AttestationError> for AccountError {
 impl From<AccountError> for ProgramError {
     fn from(error: AccountError) -> Self {
         ProgramError::Custom(error.code())
+    }
+}
+
+/// Preserve verifier program-error codes while allowing `?` in Anchor handlers.
+#[cfg(feature = "anchor")]
+impl From<AccountError> for anchor_lang::error::Error {
+    fn from(error: AccountError) -> Self {
+        ProgramError::from(error).into()
     }
 }
 
@@ -858,6 +866,33 @@ mod tests {
             ProgramError::from(AccountError::InvalidNodePda),
             ProgramError::Custom(AccountError::InvalidNodePda.code())
         );
+    }
+
+    #[cfg(feature = "anchor")]
+    #[test]
+    fn account_errors_preserve_their_codes_in_anchor_errors() {
+        let errors = [
+            AccountError::Attestation(AttestationError::InvalidSignature),
+            AccountError::AccountBorrowFailed,
+            AccountError::InvalidAccountOwner,
+            AccountError::InvalidRegistryAccount,
+            AccountError::InvalidRegistryPda,
+            AccountError::InvalidNodeAccount,
+            AccountError::InvalidNodePda,
+        ];
+
+        for error in errors {
+            let expected = ProgramError::Custom(error.code());
+            let anchor_error = anchor_lang::error::Error::from(error);
+            match anchor_error {
+                anchor_lang::error::Error::ProgramError(program_error) => {
+                    assert_eq!(program_error.program_error, expected);
+                }
+                anchor_lang::error::Error::AnchorError(_) => {
+                    panic!("account errors must remain Solana program errors");
+                }
+            }
+        }
     }
 
     #[test]

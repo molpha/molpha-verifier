@@ -1,5 +1,6 @@
 //! Property-based tests for pure verification primitives.
 
+#[allow(dead_code)]
 mod fixtures;
 
 use ethnum::U256;

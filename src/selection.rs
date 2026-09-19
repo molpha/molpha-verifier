@@ -15,8 +15,7 @@ pub const SELECTION_SEED_PREFIX: [u8; 32] = [
 /// Derive the selection bitmap for a round.
 ///
 /// `seed = keccak(SELECTION_SEED_PREFIX, source_id, registry_version_be, canonical_timestamp_be)`,
-/// then [`derive_group_bitmap`](crate::bitmap::derive_group_bitmap) with
-/// [`effective_selection_size`](crate::bitmap::effective_selection_size).
+/// then [`derive_group_bitmap`] with [`effective_selection_size`].
 pub fn derive_selection_bitmap(
     source_id: &[u8; 32],
     canonical_timestamp: u64,

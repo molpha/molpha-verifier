@@ -53,7 +53,10 @@ pub use payload::SchnorrSignature;
 pub use pop::{validate_key_and_verify_pop, NodePopError, NODE_POP_PREFIX};
 pub use state::*;
 
-pub use verify::{reconstruct_coalition_key, verify, verify_aggregate_over_hash};
+pub use verify::{
+    coalition_z_inv_hint, reconstruct_coalition_key, verify, verify_aggregate_over_hash,
+    verify_with_z_inv,
+};
 
 pub use bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};
 pub use coalition::CoalitionAccumulator;

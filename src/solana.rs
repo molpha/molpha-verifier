@@ -38,7 +38,7 @@ use solana_pubkey::Pubkey;
 use crate::{
     onchain::{resolve_intersected_signers, resolve_signers, IntersectedResolution},
     state::{SignerXy, MAX_REGISTRY_NODES},
-    verify::{verify, verify_aggregate_over_hash},
+    verify::{verify, verify_aggregate_over_hash, verify_with_z_inv},
     Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature,
 };
 
@@ -343,6 +343,34 @@ pub fn verify_attestation(
     registry_account: &AccountInfo<'_>,
     node_accounts: &[AccountInfo<'_>],
 ) -> Result<(), AccountError> {
+    verify_attestation_inner(attestation, registry_account, node_accounts, None)
+}
+
+/// [`verify_attestation`] with an untrusted coalition `Z⁻¹` hint (see [`crate::verify_with_z_inv`]).
+///
+/// Replaces the software field inversion of the coalition key with one field multiplication.
+/// The hint is typically carried in instruction data; it is not part of the signed message.
+pub fn verify_attestation_with_z_inv(
+    attestation: &Attestation,
+    registry_account: &AccountInfo<'_>,
+    node_accounts: &[AccountInfo<'_>],
+    coalition_z_inv: &[u8; 32],
+) -> Result<(), AccountError> {
+    verify_attestation_inner(
+        attestation,
+        registry_account,
+        node_accounts,
+        Some(coalition_z_inv),
+    )
+}
+
+#[inline(always)]
+fn verify_attestation_inner(
+    attestation: &Attestation,
+    registry_account: &AccountInfo<'_>,
+    node_accounts: &[AccountInfo<'_>],
+    coalition_z_inv: Option<&[u8; 32]>,
+) -> Result<(), AccountError> {
     let registry = RegistryAccount::load(registry_account)?;
     let view = registry.view();
 
@@ -355,7 +383,10 @@ pub fn verify_attestation(
         ));
     }
 
-    Ok(verify(attestation, &ordered_signers, &view)?)
+    Ok(match coalition_z_inv {
+        Some(z_inv) => verify_with_z_inv(attestation, &ordered_signers, &view, z_inv),
+        None => verify(attestation, &ordered_signers, &view),
+    }?)
 }
 
 /// Verify an aggregate over an arbitrary message hash from accounts (dispute / slash).
@@ -670,6 +701,26 @@ mod tests {
         let (registry, nodes) = accounts.split();
         verify_attestation(&fixture_attestation(), &registry, &nodes)
             .expect("account-path fixture must verify");
+    }
+
+    #[test]
+    fn verify_attestation_with_z_inv_accepts_fixture_and_rejects_bad_hint() {
+        let mut accounts = Accounts::new();
+        let (registry, nodes) = accounts.split();
+        let attestation = fixture_attestation();
+        let signers =
+            resolve_signers_accounts(&nodes, &registry, &attestation.signature.signers_bitmap)
+                .unwrap();
+        let hint = crate::coalition_z_inv_hint(&signers).unwrap();
+        verify_attestation_with_z_inv(&attestation, &registry, &nodes, &hint)
+            .expect("hinted account path must verify");
+
+        let mut bad = hint;
+        bad[0] ^= 0x01;
+        assert_eq!(
+            verify_attestation_with_z_inv(&attestation, &registry, &nodes, &bad).unwrap_err(),
+            AccountError::Attestation(AttestationError::InvalidCoalitionHint)
+        );
     }
 
     #[test]

@@ -25,10 +25,42 @@ use crate::state::{RegistryView, SignerXy};
 ///
 /// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
 /// (version → scalar → count → selection → coalition → hash → recovery).
+///
+/// Normalizes the coalition key with a field inversion; see [`verify_with_z_inv`] for the
+/// cheaper hinted path.
 pub fn verify(
     attestation: &Attestation,
     ordered_signers: &[SignerXy],
     registry: &RegistryView,
+) -> Result<(), AttestationError> {
+    verify_inner(attestation, ordered_signers, registry, None)
+}
+
+/// [`verify`] with an untrusted coalition `Z⁻¹` hint in place of the field inversion.
+///
+/// The hint is not part of the signed message; it only speeds up normalization of the coalition
+/// key and is checked with `Z·h ≡ 1`. Compute it with [`coalition_z_inv_hint`] over the same
+/// `ordered_signers`. An invalid hint fails with [`AttestationError::InvalidCoalitionHint`].
+pub fn verify_with_z_inv(
+    attestation: &Attestation,
+    ordered_signers: &[SignerXy],
+    registry: &RegistryView,
+    coalition_z_inv: &[u8; 32],
+) -> Result<(), AttestationError> {
+    verify_inner(
+        attestation,
+        ordered_signers,
+        registry,
+        Some(coalition_z_inv),
+    )
+}
+
+#[inline(always)]
+fn verify_inner(
+    attestation: &Attestation,
+    ordered_signers: &[SignerXy],
+    registry: &RegistryView,
+    coalition_z_inv: Option<&[u8; 32]>,
 ) -> Result<(), AttestationError> {
     if attestation.payload.registry_version != registry.version {
         return Err(AttestationError::InvalidRegistryVersion);
@@ -55,7 +87,11 @@ pub fn verify(
         return Err(AttestationError::SignersNotSubsetOfSelection);
     }
 
-    let x_coalition = reconstruct_coalition_key(ordered_signers)?;
+    let coalition = accumulate_coalition(ordered_signers)?;
+    let x_coalition = match coalition_z_inv {
+        Some(z_inv) => coalition.compressed_pubkey_with_z_inv(z_inv)?,
+        None => coalition.compressed_pubkey()?,
+    };
     let message_hash = compute_message_hash(&attestation.payload, signature.signers_bitmap);
 
     if recover_and_match(
@@ -76,6 +112,21 @@ pub fn verify(
 pub fn reconstruct_coalition_key(
     ordered_signers: &[SignerXy],
 ) -> Result<[u8; 33], AttestationError> {
+    accumulate_coalition(ordered_signers)?.compressed_pubkey()
+}
+
+/// Off-chain helper: the `Z⁻¹` hint accepted by [`verify_with_z_inv`] for `ordered_signers`.
+///
+/// `Z` is the verifier's own Jacobian representation of `Σ X_i` (not a property of the point),
+/// so the hint is only valid for the same signers in the same ascending bitmap order.
+pub fn coalition_z_inv_hint(ordered_signers: &[SignerXy]) -> Result<[u8; 32], AttestationError> {
+    accumulate_coalition(ordered_signers)?.z_inv_hint()
+}
+
+#[inline(always)]
+fn accumulate_coalition(
+    ordered_signers: &[SignerXy],
+) -> Result<CoalitionAccumulator, AttestationError> {
     if ordered_signers.is_empty() {
         return Err(AttestationError::InvalidSignersBitmap);
     }
@@ -83,7 +134,7 @@ pub fn reconstruct_coalition_key(
     for (x, y) in ordered_signers {
         coalition.add_stored_xy(x, y)?;
     }
-    coalition.compressed_pubkey()
+    Ok(coalition)
 }
 
 /// Verify an aggregate Schnorr signature over `message_hash` for `ordered_signers`.
@@ -262,6 +313,81 @@ mod tests {
             &signers,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn verify_with_z_inv_accepts_fixture_hint() {
+        let attestation = fixture_attestation();
+        let signers = fixture_signers_xy();
+        let hint = coalition_z_inv_hint(&signers).unwrap();
+        verify_with_z_inv(&attestation, &signers, &fixture_registry(), &hint)
+            .expect("hinted verification must accept the fixture");
+    }
+
+    #[test]
+    fn verify_with_z_inv_rejects_wrong_hints() {
+        const FIELD_PRIME: [u8; 32] = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+            0xFF, 0xFF, 0xFC, 0x2F,
+        ];
+        let attestation = fixture_attestation();
+        let signers = fixture_signers_xy();
+        let hint = coalition_z_inv_hint(&signers).unwrap();
+
+        let mut flipped = hint;
+        flipped[31] ^= 0x01;
+        // `h + p` overflows 256 bits only if `h ≥ 2^256 - p`; either way a non-canonical
+        // encoding of the right residue must be refused, so test `p` itself (≡ 0) and `h + p`
+        // when it fits.
+        let mut non_canonical = [0u8; 32];
+        let mut carry = 0u16;
+        for i in (0..32).rev() {
+            let sum = hint[i] as u16 + FIELD_PRIME[i] as u16 + carry;
+            non_canonical[i] = sum as u8;
+            carry = sum >> 8;
+        }
+        let mut bad_hints = vec![[0u8; 32], [0xff; 32], FIELD_PRIME, flipped];
+        if carry == 0 {
+            bad_hints.push(non_canonical);
+        }
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        bad_hints.push(one);
+
+        for bad in bad_hints {
+            assert_eq!(
+                verify_with_z_inv(&attestation, &signers, &fixture_registry(), &bad),
+                Err(AttestationError::InvalidCoalitionHint),
+                "hint {bad:02x?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn hint_is_bound_to_signer_order() {
+        let signers = fixture_signers_xy();
+        let mut reversed = signers.clone();
+        reversed.reverse();
+        let hint = coalition_z_inv_hint(&signers).unwrap();
+        // Same point, different Jacobian representation.
+        assert_eq!(
+            reconstruct_coalition_key(&signers).unwrap(),
+            reconstruct_coalition_key(&reversed).unwrap()
+        );
+        assert_ne!(hint, coalition_z_inv_hint(&reversed).unwrap());
+    }
+
+    #[test]
+    fn hinted_verification_still_checks_the_signature() {
+        let mut attestation = fixture_attestation();
+        attestation.signature.agg_sig_s[31] ^= 0x01;
+        let signers = fixture_signers_xy();
+        let hint = coalition_z_inv_hint(&signers).unwrap();
+        assert_eq!(
+            verify_with_z_inv(&attestation, &signers, &fixture_registry(), &hint),
+            Err(AttestationError::InvalidAggregateSignature)
+        );
     }
 
     #[test]

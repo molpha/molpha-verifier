@@ -47,28 +47,83 @@ impl CoalitionAccumulator {
         Ok(())
     }
 
+    /// Compressed coalition key, normalizing the Jacobian sum with a field inversion.
+    ///
+    /// Reference path. On-chain callers should prefer [`Self::compressed_pubkey_with_z_inv`],
+    /// which replaces the inversion with a supplied hint.
     #[inline(always)]
     pub fn compressed_pubkey(&self) -> Result<[u8; 33], AttestationError> {
-        if !self.has_point {
-            return Err(AttestationError::InvalidAggregateSignature);
+        let jacobian = self.finished_sum()?;
+        Ok(compress_affine(Affine::from_gej(jacobian)))
+    }
+
+    /// Compressed coalition key, normalizing with a caller-supplied `Z⁻¹` hint.
+    ///
+    /// `z_inv` is untrusted (e.g. instruction data). It is accepted only when it parses to a
+    /// canonical field element `h < p` and `Z·h ≡ 1 (mod p)`. Since `p` is prime, that `h` is
+    /// the unique inverse of `Z`, so `x = X·h²`, `y = Y·h³` is the same affine point
+    /// [`Self::compressed_pubkey`] returns. A wrong hint fails with
+    /// [`AttestationError::InvalidCoalitionHint`]; it cannot select another key.
+    ///
+    /// `Z` is this accumulator's Jacobian representation, which depends on the signer order
+    /// and on `libsecp256k1`'s addition formulas. Compute the hint with
+    /// [`Self::z_inv_hint`] (or [`crate::coalition_z_inv_hint`]) over the same ordered signers.
+    #[inline(always)]
+    pub fn compressed_pubkey_with_z_inv(
+        &self,
+        z_inv: &[u8; 32],
+    ) -> Result<[u8; 33], AttestationError> {
+        let jacobian = self.finished_sum()?;
+        let mut h = Field::default();
+        if !h.set_b32(z_inv) {
+            return Err(AttestationError::InvalidCoalitionHint);
         }
-        if self.jacobian.is_infinity() {
-            return Err(AttestationError::InvalidAggregateSignature);
+        let mut one = Field::default();
+        one.set_int(1);
+        if !(jacobian.z * h).eq_var(&one) {
+            return Err(AttestationError::InvalidCoalitionHint);
         }
-        let mut elem = Affine::from_gej(&self.jacobian);
-        elem.x.normalize_var();
-        elem.y.normalize_var();
-        let mut out = [0u8; 33];
-        let mut x_be = [0u8; 32];
-        elem.x.fill_b32(&mut x_be);
-        out[1..33].copy_from_slice(&x_be);
-        out[0] = if elem.y.is_odd() {
-            TAG_PUBKEY_ODD
-        } else {
-            TAG_PUBKEY_EVEN
-        };
+        let mut elem = Affine::default();
+        elem.set_gej_zinv(jacobian, &h);
+        Ok(compress_affine(elem))
+    }
+
+    /// Off-chain helper: the canonical big-endian `Z⁻¹` of the accumulated sum.
+    pub fn z_inv_hint(&self) -> Result<[u8; 32], AttestationError> {
+        let jacobian = self.finished_sum()?;
+        let mut z_inv = jacobian.z.inv();
+        z_inv.normalize();
+        let mut out = [0u8; 32];
+        z_inv.fill_b32(&mut out);
         Ok(out)
     }
+
+    /// The Jacobian sum, rejecting an empty set and the point at infinity.
+    ///
+    /// `libsecp256k1` flags infinity separately from `Z`, so this check must stay explicit even
+    /// on the hint path.
+    #[inline(always)]
+    fn finished_sum(&self) -> Result<&Jacobian, AttestationError> {
+        if !self.has_point || self.jacobian.is_infinity() {
+            return Err(AttestationError::InvalidAggregateSignature);
+        }
+        Ok(&self.jacobian)
+    }
+}
+
+#[inline(always)]
+fn compress_affine(mut elem: Affine) -> [u8; 33] {
+    elem.x.normalize_var();
+    elem.y.normalize_var();
+    let mut out = [0u8; 33];
+    elem.x
+        .fill_b32((&mut out[1..33]).try_into().expect("32-byte slice"));
+    out[0] = if elem.y.is_odd() {
+        TAG_PUBKEY_ODD
+    } else {
+        TAG_PUBKEY_EVEN
+    };
+    out
 }
 
 /// Build a `PublicKey` from stored affine coordinates (on-curve check, no decompress).

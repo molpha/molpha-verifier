@@ -63,6 +63,12 @@ pub enum AttestationError {
         error("node account index does not match bitmap")
     )]
     InvalidNodeIndex,
+    /// Supplied coalition `Z⁻¹` hint is non-canonical or does not satisfy `Z·h ≡ 1 (mod p)`.
+    #[cfg_attr(
+        feature = "thiserror",
+        error("coalition Z-inverse hint is invalid for the signer set")
+    )]
+    InvalidCoalitionHint,
 }
 
 #[cfg(all(test, feature = "thiserror"))]

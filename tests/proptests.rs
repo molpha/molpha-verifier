@@ -345,6 +345,28 @@ proptest! {
     }
 
     #[test]
+    fn z_inv_hint_path_matches_inversion_path(
+        keys in arb_fixture_pubkey_subset(),
+        tweak in any::<[u8; 32]>(),
+    ) {
+        let combined = PublicKey::combine(&keys).unwrap().serialize_compressed();
+        let mut acc = CoalitionAccumulator::default();
+        for pk in &keys {
+            let (x, y) = pubkey_to_xy(pk);
+            acc.add_stored_xy(&x, &y).unwrap();
+        }
+        let hint = acc.z_inv_hint().unwrap();
+        prop_assert_eq!(acc.compressed_pubkey_with_z_inv(&hint).unwrap(), combined);
+
+        // Any other 32-byte value is rejected: Z·h ≡ 1 has exactly one canonical solution.
+        prop_assume!(tweak != hint);
+        prop_assert_eq!(
+            acc.compressed_pubkey_with_z_inv(&tweak),
+            Err(molpha_verifier::AttestationError::InvalidCoalitionHint)
+        );
+    }
+
+    #[test]
     fn coalition_accumulator_is_commutative(keys in arb_fixture_pubkey_subset()) {
         prop_assume!(keys.len() >= 2);
         let combined = PublicKey::combine(&keys).unwrap().serialize_compressed();

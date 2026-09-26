@@ -4,10 +4,14 @@
 //! Each set bit of `signers_bitmap` binds to `registry.nodes[bit]`. Node status is ignored —
 //! a node deactivated later remains valid evidence for historical snapshots.
 
-use crate::verify::{verify, verify_aggregate_over_hash};
+use crate::verify::{
+    verify, verify_aggregate_over_hash, verify_aggregate_over_hash_with_coalition_key,
+    verify_with_coalition_key,
+};
 use crate::{
     bitmap::{for_each_set_bit, Bitmap},
-    Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature, SignerXy,
+    Attestation, AttestationError, CoalitionKey, NodeEntry, RegistryView, SchnorrSignature,
+    SignerXy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +123,23 @@ pub fn verify_attestation_resolved(
     verify(attestation, &ordered_signers, registry)
 }
 
+/// [`verify_attestation_resolved`] with the affine coalition key supplied (see
+/// [`crate::verify_with_coalition_key`]).
+pub fn verify_attestation_resolved_with_coalition_key(
+    attestation: &Attestation,
+    registry: &RegistryView<'_>,
+    nodes: &[NodeEntry],
+    coalition_key: &CoalitionKey,
+) -> Result<(), AttestationError> {
+    if attestation.payload.registry_version != registry.version {
+        return Err(AttestationError::InvalidRegistryVersion);
+    }
+
+    let ordered_signers = resolve_signers(nodes, registry, &attestation.signature.signers_bitmap)?;
+
+    verify_with_coalition_key(attestation, &ordered_signers, registry, coalition_key)
+}
+
 /// Verify an aggregate over an arbitrary message hash after resolving signers.
 ///
 /// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed input.
@@ -134,6 +155,25 @@ pub fn verify_aggregate_over_hash_resolved(
         &signature.commitment,
         message_hash,
         &ordered_signers,
+    )
+}
+
+/// [`verify_aggregate_over_hash_resolved`] with the affine coalition key supplied (see
+/// [`crate::verify_aggregate_over_hash_with_coalition_key`]).
+pub fn verify_aggregate_over_hash_resolved_with_coalition_key(
+    registry: &RegistryView<'_>,
+    signature: &SchnorrSignature,
+    message_hash: &[u8; 32],
+    nodes: &[NodeEntry],
+    coalition_key: &CoalitionKey,
+) -> Result<bool, AttestationError> {
+    let ordered_signers = resolve_signers(nodes, registry, &signature.signers_bitmap)?;
+    verify_aggregate_over_hash_with_coalition_key(
+        &signature.agg_sig_s,
+        &signature.commitment,
+        message_hash,
+        &ordered_signers,
+        coalition_key,
     )
 }
 
@@ -301,6 +341,43 @@ mod tests {
         let entries = fixture_entries(&nodes_array);
         verify_attestation_resolved(&attestation, &registry, &entries)
             .expect("resolved-path fixture must verify");
+    }
+
+    #[test]
+    fn verify_resolved_with_coalition_key_accepts_fixture_and_rejects_bad_key() {
+        let nodes_array = fixture_nodes();
+        let registry = fixture_registry(&nodes_array);
+        let attestation = fixture_attestation();
+        let entries = fixture_entries(&nodes_array);
+        let signers = resolve_signers(&entries, &registry, &SIGNERS_BITMAP).unwrap();
+        let key = crate::coalition_key(&signers).unwrap();
+        verify_attestation_resolved_with_coalition_key(&attestation, &registry, &entries, &key)
+            .expect("keyed resolved path must verify");
+        assert!(verify_aggregate_over_hash_resolved_with_coalition_key(
+            &registry,
+            &attestation.signature,
+            &attestation.message_hash(),
+            &entries,
+            &key,
+        )
+        .unwrap());
+
+        let mut bad = key;
+        bad.x[0] ^= 0x01;
+        assert_eq!(
+            verify_attestation_resolved_with_coalition_key(&attestation, &registry, &entries, &bad),
+            Err(AttestationError::InvalidCoalitionKey)
+        );
+        assert_eq!(
+            verify_aggregate_over_hash_resolved_with_coalition_key(
+                &registry,
+                &attestation.signature,
+                &attestation.message_hash(),
+                &entries,
+                &bad,
+            ),
+            Err(AttestationError::InvalidCoalitionKey)
+        );
     }
 
     #[test]

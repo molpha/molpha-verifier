@@ -7,7 +7,7 @@ use ethnum::U256;
 use libsecp256k1::PublicKey;
 use molpha_verifier::{
     bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap},
-    coalition::{public_key_from_affine_xy, CoalitionAccumulator},
+    coalition::{public_key_from_affine_xy, CoalitionAccumulator, CoalitionKey},
     message::compute_message_hash,
     payload::{AttestationPayload, SchnorrSignature},
     scalar::{
@@ -342,6 +342,43 @@ proptest! {
 
         let xy: Vec<SignerXy> = keys.iter().map(pubkey_to_xy).collect();
         prop_assert_eq!(reconstruct_coalition_key(&xy).unwrap(), combined);
+    }
+
+    #[test]
+    fn coalition_key_path_matches_inversion_path(
+        keys in arb_fixture_pubkey_subset(),
+        tweak_x in any::<[u8; 32]>(),
+        tweak_y in any::<[u8; 32]>(),
+    ) {
+        let combined = PublicKey::combine(&keys).unwrap();
+        let (x, y) = pubkey_to_xy(&combined);
+        let mut acc = CoalitionAccumulator::default();
+        for pk in &keys {
+            let (x, y) = pubkey_to_xy(pk);
+            acc.add_stored_xy(&x, &y).unwrap();
+        }
+        // The key is library-independent: `PublicKey::combine` produces the accepted value.
+        let key = CoalitionKey { x, y };
+        prop_assert_eq!(acc.coalition_key().unwrap(), key);
+        prop_assert_eq!(
+            acc.compressed_pubkey_with_key(&key).unwrap(),
+            combined.serialize_compressed()
+        );
+
+        // Any other pair is rejected: `X ≡ x·Z²`, `Y ≡ y·Z³` has exactly one canonical solution.
+        for wrong in [
+            CoalitionKey { x: tweak_x, y },
+            CoalitionKey { x, y: tweak_y },
+            CoalitionKey { x: tweak_x, y: tweak_y },
+        ] {
+            if wrong == key {
+                continue;
+            }
+            prop_assert_eq!(
+                acc.compressed_pubkey_with_key(&wrong),
+                Err(molpha_verifier::AttestationError::InvalidCoalitionKey)
+            );
+        }
     }
 
     #[test]

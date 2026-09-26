@@ -38,8 +38,11 @@ use solana_pubkey::Pubkey;
 use crate::{
     onchain::{resolve_intersected_signers, resolve_signers, IntersectedResolution},
     state::{SignerXy, MAX_REGISTRY_NODES},
-    verify::{verify, verify_aggregate_over_hash},
-    Attestation, AttestationError, NodeEntry, RegistryView, SchnorrSignature,
+    verify::{
+        verify, verify_aggregate_over_hash, verify_aggregate_over_hash_with_coalition_key,
+        verify_with_coalition_key,
+    },
+    Attestation, AttestationError, CoalitionKey, NodeEntry, RegistryView, SchnorrSignature,
 };
 
 /// Registry PDA seeds: `[REGISTRY_SEED_PREFIX, version.to_le_bytes(), [bump]]`.
@@ -343,6 +346,35 @@ pub fn verify_attestation(
     registry_account: &AccountInfo<'_>,
     node_accounts: &[AccountInfo<'_>],
 ) -> Result<(), AccountError> {
+    verify_attestation_inner(attestation, registry_account, node_accounts, None)
+}
+
+/// [`verify_attestation`] with the affine coalition key supplied instead of computed (see
+/// [`crate::verify_with_coalition_key`]).
+///
+/// Replaces the software field inversion of the coalition key with a few field multiplications.
+/// The key is typically carried in instruction data; it is not part of the signed message.
+pub fn verify_attestation_with_coalition_key(
+    attestation: &Attestation,
+    registry_account: &AccountInfo<'_>,
+    node_accounts: &[AccountInfo<'_>],
+    coalition_key: &CoalitionKey,
+) -> Result<(), AccountError> {
+    verify_attestation_inner(
+        attestation,
+        registry_account,
+        node_accounts,
+        Some(coalition_key),
+    )
+}
+
+#[inline(always)]
+fn verify_attestation_inner(
+    attestation: &Attestation,
+    registry_account: &AccountInfo<'_>,
+    node_accounts: &[AccountInfo<'_>],
+    coalition_key: Option<&CoalitionKey>,
+) -> Result<(), AccountError> {
     let registry = RegistryAccount::load(registry_account)?;
     let view = registry.view();
 
@@ -355,7 +387,10 @@ pub fn verify_attestation(
         ));
     }
 
-    Ok(verify(attestation, &ordered_signers, &view)?)
+    Ok(match coalition_key {
+        Some(key) => verify_with_coalition_key(attestation, &ordered_signers, &view, key),
+        None => verify(attestation, &ordered_signers, &view),
+    }?)
 }
 
 /// Verify an aggregate over an arbitrary message hash from accounts (dispute / slash).
@@ -369,6 +404,46 @@ pub fn verify_aggregate_over_hash_accounts(
     registry_version: u32,
     node_accounts: &[AccountInfo<'_>],
 ) -> Result<bool, AccountError> {
+    verify_aggregate_over_hash_accounts_inner(
+        registry_account,
+        signature,
+        message_hash,
+        registry_version,
+        node_accounts,
+        None,
+    )
+}
+
+/// [`verify_aggregate_over_hash_accounts`] with the affine coalition key supplied (see
+/// [`crate::verify_aggregate_over_hash_with_coalition_key`]). A wrong key is an `Err`, not an
+/// `Ok(false)` verdict.
+pub fn verify_aggregate_over_hash_accounts_with_coalition_key(
+    registry_account: &AccountInfo<'_>,
+    signature: SchnorrSignature,
+    message_hash: &[u8; 32],
+    registry_version: u32,
+    node_accounts: &[AccountInfo<'_>],
+    coalition_key: &CoalitionKey,
+) -> Result<bool, AccountError> {
+    verify_aggregate_over_hash_accounts_inner(
+        registry_account,
+        signature,
+        message_hash,
+        registry_version,
+        node_accounts,
+        Some(coalition_key),
+    )
+}
+
+#[inline(always)]
+fn verify_aggregate_over_hash_accounts_inner(
+    registry_account: &AccountInfo<'_>,
+    signature: SchnorrSignature,
+    message_hash: &[u8; 32],
+    registry_version: u32,
+    node_accounts: &[AccountInfo<'_>],
+    coalition_key: Option<&CoalitionKey>,
+) -> Result<bool, AccountError> {
     let registry = RegistryAccount::load(registry_account)?;
     let view = registry.view();
     if view.version != registry_version {
@@ -376,12 +451,17 @@ pub fn verify_aggregate_over_hash_accounts(
     }
     let ordered_signers =
         resolve_signers_accounts_core(node_accounts, &view, &signature.signers_bitmap)?;
-    Ok(verify_aggregate_over_hash(
-        &signature.agg_sig_s,
-        &signature.commitment,
-        message_hash,
-        &ordered_signers,
-    )?)
+    let (s, commitment) = (&signature.agg_sig_s, &signature.commitment);
+    Ok(match coalition_key {
+        Some(key) => verify_aggregate_over_hash_with_coalition_key(
+            s,
+            commitment,
+            message_hash,
+            &ordered_signers,
+            key,
+        ),
+        None => verify_aggregate_over_hash(s, commitment, message_hash, &ordered_signers),
+    }?)
 }
 
 #[cfg(test)]
@@ -670,6 +750,64 @@ mod tests {
         let (registry, nodes) = accounts.split();
         verify_attestation(&fixture_attestation(), &registry, &nodes)
             .expect("account-path fixture must verify");
+    }
+
+    #[test]
+    fn verify_attestation_with_coalition_key_accepts_fixture_and_rejects_bad_key() {
+        let mut accounts = Accounts::new();
+        let (registry, nodes) = accounts.split();
+        let attestation = fixture_attestation();
+        let signers =
+            resolve_signers_accounts(&nodes, &registry, &attestation.signature.signers_bitmap)
+                .unwrap();
+        let key = crate::coalition_key(&signers).unwrap();
+        verify_attestation_with_coalition_key(&attestation, &registry, &nodes, &key)
+            .expect("keyed account path must verify");
+
+        let mut bad = key;
+        bad.x[0] ^= 0x01;
+        assert_eq!(
+            verify_attestation_with_coalition_key(&attestation, &registry, &nodes, &bad)
+                .unwrap_err(),
+            AccountError::Attestation(AttestationError::InvalidCoalitionKey)
+        );
+    }
+
+    #[test]
+    fn verify_aggregate_over_hash_accounts_with_coalition_key_roundtrip() {
+        let mut accounts = Accounts::new();
+        let attestation = fixture_attestation();
+        let message_hash = attestation.message_hash();
+        let (registry, nodes) = accounts.split();
+        let signers =
+            resolve_signers_accounts(&nodes, &registry, &attestation.signature.signers_bitmap)
+                .unwrap();
+        let key = crate::coalition_key(&signers).unwrap();
+
+        assert!(verify_aggregate_over_hash_accounts_with_coalition_key(
+            &registry,
+            attestation.signature.clone(),
+            &message_hash,
+            REGISTRY_VERSION,
+            &nodes,
+            &key,
+        )
+        .expect("keyed dispute path must run"));
+
+        let mut bad = key;
+        bad.y[0] ^= 0x01;
+        assert_eq!(
+            verify_aggregate_over_hash_accounts_with_coalition_key(
+                &registry,
+                attestation.signature,
+                &message_hash,
+                REGISTRY_VERSION,
+                &nodes,
+                &bad,
+            )
+            .unwrap_err(),
+            AccountError::Attestation(AttestationError::InvalidCoalitionKey)
+        );
     }
 
     #[test]

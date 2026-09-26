@@ -63,6 +63,12 @@ pub enum AttestationError {
         error("node account index does not match bitmap")
     )]
     InvalidNodeIndex,
+    /// Supplied coalition key is non-canonical or is not the affine sum of the signer keys.
+    #[cfg_attr(
+        feature = "thiserror",
+        error("coalition key is not the sum of the signer keys")
+    )]
+    InvalidCoalitionKey,
 }
 
 #[cfg(all(test, feature = "thiserror"))]

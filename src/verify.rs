@@ -5,7 +5,7 @@
 use solana_secp256k1_recover::secp256k1_recover;
 
 use crate::bitmap::Bitmap;
-use crate::coalition::CoalitionAccumulator;
+use crate::coalition::{CoalitionAccumulator, CoalitionKey};
 use crate::error::AttestationError;
 use crate::message::compute_message_hash;
 use crate::payload::Attestation;
@@ -26,8 +26,8 @@ use crate::state::{RegistryView, SignerXy};
 /// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
 /// (version → scalar → count → selection → coalition → hash → recovery).
 ///
-/// Normalizes the coalition key with a field inversion; see [`verify_with_z_inv`] for the
-/// cheaper hinted path.
+/// Normalizes the coalition key with a field inversion; see [`verify_with_coalition_key`] for
+/// the cheaper keyed path.
 pub fn verify(
     attestation: &Attestation,
     ordered_signers: &[SignerXy],
@@ -36,23 +36,20 @@ pub fn verify(
     verify_inner(attestation, ordered_signers, registry, None)
 }
 
-/// [`verify`] with an untrusted coalition `Z⁻¹` hint in place of the field inversion.
+/// [`verify`] with the affine coalition key supplied instead of computed.
 ///
-/// The hint is not part of the signed message; it only speeds up normalization of the coalition
-/// key and is checked with `Z·h ≡ 1`. Compute it with [`coalition_z_inv_hint`] over the same
-/// `ordered_signers`. An invalid hint fails with [`AttestationError::InvalidCoalitionHint`].
-pub fn verify_with_z_inv(
+/// `coalition_key` is untrusted and not part of the signed message. It replaces the field
+/// inversion with a projective check against the verifier's own sum (see
+/// [`CoalitionAccumulator::compressed_pubkey_with_key`]); compute it with [`coalition_key`] or
+/// any secp256k1 point sum over the same signers. A wrong key fails with
+/// [`AttestationError::InvalidCoalitionKey`].
+pub fn verify_with_coalition_key(
     attestation: &Attestation,
     ordered_signers: &[SignerXy],
     registry: &RegistryView,
-    coalition_z_inv: &[u8; 32],
+    coalition_key: &CoalitionKey,
 ) -> Result<(), AttestationError> {
-    verify_inner(
-        attestation,
-        ordered_signers,
-        registry,
-        Some(coalition_z_inv),
-    )
+    verify_inner(attestation, ordered_signers, registry, Some(coalition_key))
 }
 
 #[inline(always)]
@@ -60,7 +57,7 @@ fn verify_inner(
     attestation: &Attestation,
     ordered_signers: &[SignerXy],
     registry: &RegistryView,
-    coalition_z_inv: Option<&[u8; 32]>,
+    coalition_key: Option<&CoalitionKey>,
 ) -> Result<(), AttestationError> {
     if attestation.payload.registry_version != registry.version {
         return Err(AttestationError::InvalidRegistryVersion);
@@ -87,11 +84,7 @@ fn verify_inner(
         return Err(AttestationError::SignersNotSubsetOfSelection);
     }
 
-    let coalition = accumulate_coalition(ordered_signers)?;
-    let x_coalition = match coalition_z_inv {
-        Some(z_inv) => coalition.compressed_pubkey_with_z_inv(z_inv)?,
-        None => coalition.compressed_pubkey()?,
-    };
+    let x_coalition = compressed_coalition_key(ordered_signers, coalition_key)?;
     let message_hash = compute_message_hash(&attestation.payload, signature.signers_bitmap);
 
     if recover_and_match(
@@ -115,12 +108,12 @@ pub fn reconstruct_coalition_key(
     accumulate_coalition(ordered_signers)?.compressed_pubkey()
 }
 
-/// Off-chain helper: the `Z⁻¹` hint accepted by [`verify_with_z_inv`] for `ordered_signers`.
+/// Off-chain helper: the affine [`CoalitionKey`] accepted by the `*_with_coalition_key` paths.
 ///
-/// `Z` is the verifier's own Jacobian representation of `Σ X_i` (not a property of the point),
-/// so the hint is only valid for the same signers in the same ascending bitmap order.
-pub fn coalition_z_inv_hint(ordered_signers: &[SignerXy]) -> Result<[u8; 32], AttestationError> {
-    accumulate_coalition(ordered_signers)?.z_inv_hint()
+/// A property of the point `Σ X_i`, so any signer order (and any secp256k1 library) gives the
+/// same value. Errors on an empty set or a point-at-infinity sum.
+pub fn coalition_key(signers: &[SignerXy]) -> Result<CoalitionKey, AttestationError> {
+    accumulate_coalition(signers)?.coalition_key()
 }
 
 #[inline(always)]
@@ -137,6 +130,19 @@ fn accumulate_coalition(
     Ok(coalition)
 }
 
+/// Compressed `Σ X_i`, checked against `coalition_key` when supplied, else inverted.
+#[inline(always)]
+fn compressed_coalition_key(
+    ordered_signers: &[SignerXy],
+    coalition_key: Option<&CoalitionKey>,
+) -> Result<[u8; 33], AttestationError> {
+    let coalition = accumulate_coalition(ordered_signers)?;
+    match coalition_key {
+        Some(key) => coalition.compressed_pubkey_with_key(key),
+        None => coalition.compressed_pubkey(),
+    }
+}
+
 /// Verify an aggregate Schnorr signature over `message_hash` for `ordered_signers`.
 pub fn verify_aggregate_over_hash(
     agg_sig_s: &[u8; 32],
@@ -144,11 +150,42 @@ pub fn verify_aggregate_over_hash(
     message_hash: &[u8; 32],
     ordered_signers: &[SignerXy],
 ) -> Result<bool, AttestationError> {
+    verify_aggregate_over_hash_inner(agg_sig_s, commitment, message_hash, ordered_signers, None)
+}
+
+/// [`verify_aggregate_over_hash`] with the affine coalition key supplied instead of computed.
+///
+/// A wrong key is an input error (`Err(InvalidCoalitionKey)`), never an `Ok(false)` verdict:
+/// it says nothing about the signature.
+pub fn verify_aggregate_over_hash_with_coalition_key(
+    agg_sig_s: &[u8; 32],
+    commitment: &[u8; 20],
+    message_hash: &[u8; 32],
+    ordered_signers: &[SignerXy],
+    coalition_key: &CoalitionKey,
+) -> Result<bool, AttestationError> {
+    verify_aggregate_over_hash_inner(
+        agg_sig_s,
+        commitment,
+        message_hash,
+        ordered_signers,
+        Some(coalition_key),
+    )
+}
+
+#[inline(always)]
+fn verify_aggregate_over_hash_inner(
+    agg_sig_s: &[u8; 32],
+    commitment: &[u8; 20],
+    message_hash: &[u8; 32],
+    ordered_signers: &[SignerXy],
+    coalition_key: Option<&CoalitionKey>,
+) -> Result<bool, AttestationError> {
     if !secp256k1_scalar_is_valid_nonzero(agg_sig_s) {
         return Ok(false);
     }
 
-    let x_coalition = reconstruct_coalition_key(ordered_signers)?;
+    let x_coalition = compressed_coalition_key(ordered_signers, coalition_key)?;
     Ok(recover_and_match(
         &x_coalition,
         message_hash,
@@ -316,77 +353,107 @@ mod tests {
     }
 
     #[test]
-    fn verify_with_z_inv_accepts_fixture_hint() {
+    fn verify_with_coalition_key_accepts_fixture_key() {
         let attestation = fixture_attestation();
         let signers = fixture_signers_xy();
-        let hint = coalition_z_inv_hint(&signers).unwrap();
-        verify_with_z_inv(&attestation, &signers, &fixture_registry(), &hint)
-            .expect("hinted verification must accept the fixture");
+        let key = coalition_key(&signers).unwrap();
+        verify_with_coalition_key(&attestation, &signers, &fixture_registry(), &key)
+            .expect("keyed verification must accept the fixture");
     }
 
     #[test]
-    fn verify_with_z_inv_rejects_wrong_hints() {
-        const FIELD_PRIME: [u8; 32] = [
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-            0xFF, 0xFF, 0xFC, 0x2F,
-        ];
+    fn verify_with_coalition_key_rejects_wrong_keys() {
         let attestation = fixture_attestation();
         let signers = fixture_signers_xy();
-        let hint = coalition_z_inv_hint(&signers).unwrap();
+        let key = coalition_key(&signers).unwrap();
 
-        let mut flipped = hint;
-        flipped[31] ^= 0x01;
-        // `h + p` overflows 256 bits only if `h ≥ 2^256 - p`; either way a non-canonical
-        // encoding of the right residue must be refused, so test `p` itself (≡ 0) and `h + p`
-        // when it fits.
-        let mut non_canonical = [0u8; 32];
-        let mut carry = 0u16;
-        for i in (0..32).rev() {
-            let sum = hint[i] as u16 + FIELD_PRIME[i] as u16 + carry;
-            non_canonical[i] = sum as u8;
-            carry = sum >> 8;
-        }
-        let mut bad_hints = vec![[0u8; 32], [0xff; 32], FIELD_PRIME, flipped];
-        if carry == 0 {
-            bad_hints.push(non_canonical);
-        }
-        let mut one = [0u8; 32];
-        one[31] = 1;
-        bad_hints.push(one);
+        let mut flipped = key;
+        flipped.x[31] ^= 0x01;
+        // A real key, but of a different signer set.
+        let subset = coalition_key(&signers[1..]).unwrap();
+        let single = CoalitionKey {
+            x: signers[0].0,
+            y: signers[0].1,
+        };
+        let zero = CoalitionKey {
+            x: [0u8; 32],
+            y: [0u8; 32],
+        };
 
-        for bad in bad_hints {
+        for bad in [flipped, subset, single, zero] {
             assert_eq!(
-                verify_with_z_inv(&attestation, &signers, &fixture_registry(), &bad),
-                Err(AttestationError::InvalidCoalitionHint),
-                "hint {bad:02x?} must be rejected"
+                verify_with_coalition_key(&attestation, &signers, &fixture_registry(), &bad),
+                Err(AttestationError::InvalidCoalitionKey),
+                "key {bad:02x?} must be rejected"
             );
         }
     }
 
     #[test]
-    fn hint_is_bound_to_signer_order() {
+    fn coalition_key_is_independent_of_signer_order() {
         let signers = fixture_signers_xy();
         let mut reversed = signers.clone();
         reversed.reverse();
-        let hint = coalition_z_inv_hint(&signers).unwrap();
-        // Same point, different Jacobian representation.
-        assert_eq!(
-            reconstruct_coalition_key(&signers).unwrap(),
-            reconstruct_coalition_key(&reversed).unwrap()
-        );
-        assert_ne!(hint, coalition_z_inv_hint(&reversed).unwrap());
+        let key = coalition_key(&signers).unwrap();
+        assert_eq!(key, coalition_key(&reversed).unwrap());
+
+        let compressed = reconstruct_coalition_key(&signers).unwrap();
+        assert_eq!(compressed[1..], key.x);
+        assert_eq!(compressed[0] & 1, key.y[31] & 1);
     }
 
     #[test]
-    fn hinted_verification_still_checks_the_signature() {
+    fn keyed_verification_still_checks_the_signature() {
         let mut attestation = fixture_attestation();
         attestation.signature.agg_sig_s[31] ^= 0x01;
         let signers = fixture_signers_xy();
-        let hint = coalition_z_inv_hint(&signers).unwrap();
+        let key = coalition_key(&signers).unwrap();
         assert_eq!(
-            verify_with_z_inv(&attestation, &signers, &fixture_registry(), &hint),
+            verify_with_coalition_key(&attestation, &signers, &fixture_registry(), &key),
             Err(AttestationError::InvalidAggregateSignature)
+        );
+    }
+
+    #[test]
+    fn keyed_aggregate_over_hash_separates_verdicts_from_bad_keys() {
+        let attestation = fixture_attestation();
+        let signers = fixture_signers_xy();
+        let key = coalition_key(&signers).unwrap();
+        let message_hash = attestation.message_hash();
+        let (s, commitment) = (
+            &attestation.signature.agg_sig_s,
+            &attestation.signature.commitment,
+        );
+
+        assert_eq!(
+            verify_aggregate_over_hash_with_coalition_key(
+                s,
+                commitment,
+                &message_hash,
+                &signers,
+                &key
+            ),
+            Ok(true)
+        );
+
+        let mut bad_hash = message_hash;
+        bad_hash[0] ^= 0xff;
+        assert_eq!(
+            verify_aggregate_over_hash_with_coalition_key(s, commitment, &bad_hash, &signers, &key),
+            Ok(false)
+        );
+
+        let mut bad_key = key;
+        bad_key.y[0] ^= 0x01;
+        assert_eq!(
+            verify_aggregate_over_hash_with_coalition_key(
+                s,
+                commitment,
+                &message_hash,
+                &signers,
+                &bad_key
+            ),
+            Err(AttestationError::InvalidCoalitionKey)
         );
     }
 

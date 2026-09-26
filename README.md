@@ -15,7 +15,7 @@ Given an [`AttestationPayload`](src/payload.rs) (or combined [`Attestation`](src
 2. Enforces `popcount(signers_bitmap) ≥ signatures_required`
 3. Requires the supplied signer set to be exactly `popcount(signers_bitmap)` long
 4. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
-5. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys
+5. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys, normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
 6. Hashes the message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
 7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
 
@@ -176,7 +176,7 @@ Errors come back as [`solana::AccountError`](src/solana.rs), which wraps `Attest
 ### Anchor integration (`anchor` feature)
 
 The `anchor` feature includes the `solana` adapters and makes `AttestationPayload`,
-`SchnorrSignature`, and `Attestation` directly usable as Anchor instruction types. It also
+`SchnorrSignature`, `Attestation`, and `CoalitionKey` directly usable as Anchor instruction types. It also
 converts `AccountError` into Anchor's error type while preserving the verifier's stable custom
 program-error codes:
 
@@ -231,6 +231,40 @@ let valid = verify_aggregate_over_hash(
 )?;
 ```
 
+### Supplying the coalition key
+
+Every verification entry point has a `*_with_coalition_key` variant that takes the affine
+coalition key `Σ X_i` as a [`CoalitionKey`](src/coalition.rs) `{ x, y }` (big-endian, 64 bytes)
+instead of computing it:
+
+| Computes the key | Takes the key |
+| --- | --- |
+| `verify` | `verify_with_coalition_key` |
+| `verify_attestation_resolved` | `verify_attestation_resolved_with_coalition_key` |
+| `verify_aggregate_over_hash` | `verify_aggregate_over_hash_with_coalition_key` |
+| `verify_aggregate_over_hash_resolved` | `verify_aggregate_over_hash_resolved_with_coalition_key` |
+| `solana::verify_attestation` | `solana::verify_attestation_with_coalition_key` |
+| `solana::verify_aggregate_over_hash_accounts` | `solana::verify_aggregate_over_hash_accounts_with_coalition_key` |
+
+The verifier still sums the signer keys itself, as a Jacobian point `(X, Y, Z)`. Normalizing that
+to affine coordinates needs a field inversion, which dominates the fixed cost on Solana (roughly
+138k CU). A supplied key replaces it with `X ≡ x·Z²` and `Y ≡ y·Z³ (mod p)`, plus a check that
+both coordinates are canonical. `Z ≠ 0` for any sum that isn't infinity, so exactly one key
+passes. A wrong key fails with `AttestationError::InvalidCoalitionKey`, and it can't select a
+different key. The dispute variants return that as an `Err`, never as an `Ok(false)` verdict.
+
+The key is a property of the point, not of this crate's arithmetic. Any secp256k1 library gives
+the same value as the plain sum of the signers' public keys, in any order. It isn't part of the
+signed message or of `Attestation`. Carry it next to the attestation, for example in Solana
+instruction data. `coalition_key(&signers)` computes it off-chain.
+
+```rust
+use molpha_verifier::{coalition_key, verify_with_coalition_key};
+
+let key = coalition_key(&ordered_signers)?; // off-chain, or any library's point sum
+verify_with_coalition_key(&attestation, &ordered_signers, &registry, &key)?;
+```
+
 ## Modules
 
 | Module | Role |
@@ -242,7 +276,7 @@ let valid = verify_aggregate_over_hash(
 | `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
 | `message` | Molpha message hash (`MOLPHA_MESSAGE_V1`) |
 | `bitmap` | [`Bitmap`] (256-bit set) and deterministic group sampling |
-| `coalition` | secp256k1 point sum accumulator |
+| `coalition` | secp256k1 point sum accumulator and the `CoalitionKey` input |
 | `scalar` | Schnorr→ECDSA inputs, ETH address from pubkey |
 | `state` | Framework-agnostic snapshot view (`RegistryView`, `NodeEntry`, `MAX_REGISTRY_NODES`) |
 | `solana` | *(feature-gated)* `AccountInfo` adapters — owner / discriminator / PDA checks, account decode |

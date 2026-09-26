@@ -8,6 +8,29 @@ use libsecp256k1::{
 
 use crate::error::AttestationError;
 
+/// Affine coalition key `Σ X_i = (x, y)`, big-endian: an untrusted verification input.
+///
+/// Supplying it lets the verifier check its Jacobian sum against the key instead of normalizing
+/// the sum with a field inversion (see [`CoalitionAccumulator::compressed_pubkey_with_key`]).
+/// It is a property of the point, not of the verifier's arithmetic: any secp256k1 library
+/// computes it as the plain sum of the signers' public keys, in any order.
+///
+/// Not part of the signed message or the cross-VM [`crate::Attestation`]; carry it next to the
+/// attestation, e.g. in Solana instruction data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    all(feature = "borsh", not(feature = "anchor")),
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
+#[cfg_attr(
+    feature = "anchor",
+    derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)
+)]
+pub struct CoalitionKey {
+    pub x: [u8; 32],
+    pub y: [u8; 32],
+}
+
 /// Load a curve point from registry-stored `(x, y)` without an on-curve re-check.
 ///
 /// Coordinates are validated at registration; the hot path only needs field parsing.
@@ -49,59 +72,61 @@ impl CoalitionAccumulator {
 
     /// Compressed coalition key, normalizing the Jacobian sum with a field inversion.
     ///
-    /// Reference path. On-chain callers should prefer [`Self::compressed_pubkey_with_z_inv`],
-    /// which replaces the inversion with a supplied hint.
+    /// Reference path. On-chain callers should prefer [`Self::compressed_pubkey_with_key`], which
+    /// replaces the inversion with a check of a supplied [`CoalitionKey`].
     #[inline(always)]
     pub fn compressed_pubkey(&self) -> Result<[u8; 33], AttestationError> {
         let jacobian = self.finished_sum()?;
         Ok(compress_affine(Affine::from_gej(jacobian)))
     }
 
-    /// Compressed coalition key, normalizing with a caller-supplied `Z⁻¹` hint.
+    /// Compressed coalition key, checking a caller-supplied affine key projectively.
     ///
-    /// `z_inv` is untrusted (e.g. instruction data). It is accepted only when it parses to a
-    /// canonical field element `h < p` and `Z·h ≡ 1 (mod p)`. Since `p` is prime, that `h` is
-    /// the unique inverse of `Z`, so `x = X·h²`, `y = Y·h³` is the same affine point
-    /// [`Self::compressed_pubkey`] returns. A wrong hint fails with
-    /// [`AttestationError::InvalidCoalitionHint`]; it cannot select another key.
-    ///
-    /// `Z` is this accumulator's Jacobian representation, which depends on the signer order
-    /// and on `libsecp256k1`'s addition formulas. Compute the hint with
-    /// [`Self::z_inv_hint`] (or [`crate::coalition_z_inv_hint`]) over the same ordered signers.
+    /// `key` is untrusted (e.g. instruction data). It is accepted only when both coordinates
+    /// parse to canonical field elements (`< p`) and `X ≡ x·Z²`, `Y ≡ y·Z³ (mod p)` against this
+    /// accumulator's Jacobian sum `(X, Y, Z)`. The sum is not infinity, so `Z ≠ 0` and those
+    /// equations pin `(x, y)` to its affine form whatever formulas or signer order produced the
+    /// representative. A wrong key fails with [`AttestationError::InvalidCoalitionKey`]; it
+    /// cannot select another key.
     #[inline(always)]
-    pub fn compressed_pubkey_with_z_inv(
+    pub fn compressed_pubkey_with_key(
         &self,
-        z_inv: &[u8; 32],
+        key: &CoalitionKey,
     ) -> Result<[u8; 33], AttestationError> {
         let jacobian = self.finished_sum()?;
-        let mut h = Field::default();
-        if !h.set_b32(z_inv) {
-            return Err(AttestationError::InvalidCoalitionHint);
+        let mut x = Field::default();
+        let mut y = Field::default();
+        if !x.set_b32(&key.x) || !y.set_b32(&key.y) {
+            return Err(AttestationError::InvalidCoalitionKey);
         }
-        let mut one = Field::default();
-        one.set_int(1);
-        if !(jacobian.z * h).eq_var(&one) {
-            return Err(AttestationError::InvalidCoalitionHint);
+        let z2 = jacobian.z.sqr();
+        let z3 = z2 * jacobian.z;
+        if !(x * z2).eq_var(&jacobian.x) || !(y * z3).eq_var(&jacobian.y) {
+            return Err(AttestationError::InvalidCoalitionKey);
         }
         let mut elem = Affine::default();
-        elem.set_gej_zinv(jacobian, &h);
+        elem.set_xy(&x, &y);
         Ok(compress_affine(elem))
     }
 
-    /// Off-chain helper: the canonical big-endian `Z⁻¹` of the accumulated sum.
-    pub fn z_inv_hint(&self) -> Result<[u8; 32], AttestationError> {
-        let jacobian = self.finished_sum()?;
-        let mut z_inv = jacobian.z.inv();
-        z_inv.normalize();
-        let mut out = [0u8; 32];
-        z_inv.fill_b32(&mut out);
-        Ok(out)
+    /// Off-chain helper: the affine [`CoalitionKey`] of the accumulated sum (one field inversion).
+    pub fn coalition_key(&self) -> Result<CoalitionKey, AttestationError> {
+        let mut elem = Affine::from_gej(self.finished_sum()?);
+        elem.x.normalize();
+        elem.y.normalize();
+        let mut key = CoalitionKey {
+            x: [0u8; 32],
+            y: [0u8; 32],
+        };
+        elem.x.fill_b32(&mut key.x);
+        elem.y.fill_b32(&mut key.y);
+        Ok(key)
     }
 
     /// The Jacobian sum, rejecting an empty set and the point at infinity.
     ///
     /// `libsecp256k1` flags infinity separately from `Z`, so this check must stay explicit even
-    /// on the hint path.
+    /// on the keyed path.
     #[inline(always)]
     fn finished_sum(&self) -> Result<&Jacobian, AttestationError> {
         if !self.has_point || self.jacobian.is_infinity() {
@@ -293,5 +318,121 @@ mod tests {
             CoalitionAccumulator::default().compressed_pubkey(),
             Err(AttestationError::InvalidAggregateSignature)
         );
+        let key = CoalitionKey {
+            x: [1u8; 32],
+            y: [1u8; 32],
+        };
+        assert_eq!(
+            CoalitionAccumulator::default().compressed_pubkey_with_key(&key),
+            Err(AttestationError::InvalidAggregateSignature)
+        );
+    }
+
+    fn accumulate(keys: &[PublicKey]) -> CoalitionAccumulator {
+        let mut acc = CoalitionAccumulator::default();
+        for pk in keys {
+            let (x, y) = xy_of(pk);
+            acc.add_stored_xy(&x, &y).expect("accumulate");
+        }
+        acc
+    }
+
+    fn add_be(a: &[u8; 32], b: &[u8; 32]) -> Option<[u8; 32]> {
+        let mut out = [0u8; 32];
+        let mut carry = 0u16;
+        for i in (0..32).rev() {
+            let sum = a[i] as u16 + b[i] as u16 + carry;
+            out[i] = sum as u8;
+            carry = sum >> 8;
+        }
+        (carry == 0).then_some(out)
+    }
+
+    #[test]
+    fn coalition_key_is_the_combined_point() {
+        let keys = [fixture_key(0), fixture_key(1), fixture_key(2)];
+        let combined = PublicKey::combine(&keys).expect("combine");
+        let (x, y) = xy_of(&combined);
+        assert_eq!(
+            accumulate(&keys).coalition_key().expect("key"),
+            CoalitionKey { x, y }
+        );
+    }
+
+    #[test]
+    fn keyed_path_matches_inversion_path_in_any_order() {
+        let keys = [fixture_key(0), fixture_key(1), fixture_key(2)];
+        let acc = accumulate(&keys);
+        let key = acc.coalition_key().expect("key");
+        let expected = acc.compressed_pubkey().expect("compressed");
+        assert_eq!(acc.compressed_pubkey_with_key(&key), Ok(expected));
+
+        // Same point, different Jacobian representative: the key does not depend on it.
+        let reversed = accumulate(&[keys[2], keys[1], keys[0]]);
+        assert_eq!(reversed.compressed_pubkey_with_key(&key), Ok(expected));
+
+        // A single signer's own key is its coalition key (`Z = 1`).
+        let (x, y) = xy_of(&keys[1]);
+        assert_eq!(
+            accumulate(&keys[1..2]).compressed_pubkey_with_key(&CoalitionKey { x, y }),
+            Ok(keys[1].serialize_compressed())
+        );
+    }
+
+    #[test]
+    fn keyed_path_rejects_wrong_keys() {
+        let keys = [fixture_key(0), fixture_key(1), fixture_key(2)];
+        let acc = accumulate(&keys);
+        let key = acc.coalition_key().expect("key");
+        let (other_x, other_y) = xy_of(&keys[0]);
+
+        let mut flipped_x = key;
+        flipped_x.x[31] ^= 0x01;
+        let mut flipped_y = key;
+        flipped_y.y[31] ^= 0x01;
+        let mut bad = vec![
+            flipped_x,
+            flipped_y,
+            // Same x, other parity: the Y equation must reject it.
+            CoalitionKey {
+                x: key.x,
+                y: negate_y(&key.y),
+            },
+            CoalitionKey {
+                x: other_x,
+                y: other_y,
+            },
+            CoalitionKey {
+                x: [0u8; 32],
+                y: [0u8; 32],
+            },
+            CoalitionKey {
+                x: key.x,
+                y: FIELD_PRIME,
+            },
+            CoalitionKey {
+                x: FIELD_PRIME,
+                y: key.y,
+            },
+            CoalitionKey {
+                x: [0xff; 32],
+                y: key.y,
+            },
+        ];
+        // Non-canonical encodings of the right residues must be refused, not reduced.
+        if let Some(x) = add_be(&key.x, &FIELD_PRIME) {
+            bad.push(CoalitionKey { x, y: key.y });
+        }
+        if let Some(y) = add_be(&key.y, &FIELD_PRIME) {
+            bad.push(CoalitionKey { x: key.x, y });
+        }
+
+        for wrong in bad {
+            assert_eq!(
+                acc.compressed_pubkey_with_key(&wrong),
+                Err(AttestationError::InvalidCoalitionKey),
+                "key {wrong:02x?} must be rejected"
+            );
+        }
     }
 }

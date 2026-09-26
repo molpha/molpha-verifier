@@ -54,12 +54,12 @@ pub use pop::{validate_key_and_verify_pop, NodePopError, NODE_POP_PREFIX};
 pub use state::*;
 
 pub use verify::{
-    coalition_z_inv_hint, reconstruct_coalition_key, verify, verify_aggregate_over_hash,
-    verify_with_z_inv,
+    coalition_key, reconstruct_coalition_key, verify, verify_aggregate_over_hash,
+    verify_aggregate_over_hash_with_coalition_key, verify_with_coalition_key,
 };
 
 pub use bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};
-pub use coalition::CoalitionAccumulator;
+pub use coalition::{CoalitionAccumulator, CoalitionKey};
 pub use message::{compute_message_hash, MESSAGE_PREFIX};
 pub use scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,

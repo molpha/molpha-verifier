@@ -4,7 +4,7 @@
 //! hard-fork-class change, not a casual test update.
 
 use molpha_verifier::bitmap::derive_group_bitmap;
-use molpha_verifier::selection::derive_selection_bitmap;
+use molpha_verifier::selection::{derive_selection_bitmap, SELECTION_WINDOW_MS};
 use molpha_verifier::RegistryView;
 use sha2::{Digest, Sha256};
 
@@ -45,7 +45,11 @@ fn derive_selection_bitmap_sweep_digest_is_stable() {
     for i in 0..64u32 {
         let source_id = sweep_seed(i);
         let registry_version = i.wrapping_mul(7).wrapping_add(1);
-        let canonical_timestamp = 1_705_257_421u64.wrapping_add(u64::from(i) * 99_991);
+        // The seed reads the 1 s window index; the sub-window millisecond offset must not matter.
+        let window = 1_705_257_421u64.wrapping_add(u64::from(i) * 99_991);
+        let timestamp = window
+            .wrapping_mul(SELECTION_WINDOW_MS)
+            .wrapping_add(u64::from(i * 37) % SELECTION_WINDOW_MS);
         for node_count in [1u32, 2, 3, 7, 12, 31, 32, 33, 64, 100, 128, 200, 255, 256] {
             for signatures_required in [0u8, 1, 5, 17, 64, 200, 255] {
                 for redundancy_buffer in [0u8, 2, 9, 128, 255] {
@@ -57,7 +61,7 @@ fn derive_selection_bitmap_sweep_digest_is_stable() {
                     };
                     let got = derive_selection_bitmap(
                         &source_id,
-                        canonical_timestamp,
+                        timestamp,
                         signatures_required,
                         &registry,
                     )

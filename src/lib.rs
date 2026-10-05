@@ -65,4 +65,6 @@ pub use scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,
     secp256k1_scalar_is_valid_nonzero,
 };
-pub use selection::{derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX};
+pub use selection::{
+    derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX, SELECTION_WINDOW_MS,
+};

@@ -76,7 +76,7 @@ fn verify_inner(
 
     if !verify_selection(
         &attestation.payload.source_id,
-        attestation.payload.canonical_timestamp,
+        attestation.payload.timestamp,
         attestation.payload.signatures_required,
         registry,
         &signature.signers_bitmap,
@@ -217,8 +217,8 @@ mod tests {
     use super::*;
     use crate::coalition::public_key_from_affine_xy;
     use crate::fixtures::{
-        CANONICAL_TIMESTAMP, COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT,
-        REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SIGNER_COUNT, SOURCE_ID, VALUE,
+        COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT, REGISTRY_VERSION, S,
+        SIGNATURES_REQUIRED, SIGNERS_BITMAP, SIGNER_COUNT, SOURCE_ID, TIMESTAMP, VALUE,
     };
     use crate::message::MESSAGE_PREFIX;
     use libsecp256k1::PublicKey;
@@ -270,7 +270,7 @@ mod tests {
                 value: VALUE,
                 source_id: SOURCE_ID,
                 registry_version: REGISTRY_VERSION,
-                canonical_timestamp: CANONICAL_TIMESTAMP,
+                timestamp: TIMESTAMP,
                 signatures_required: SIGNATURES_REQUIRED,
             },
             signature: crate::payload::SchnorrSignature {

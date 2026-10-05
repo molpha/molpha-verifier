@@ -96,13 +96,13 @@ fn arb_attestation_payload() -> impl Strategy<Value = AttestationPayload> {
         any::<u64>(),
     )
         .prop_map(
-            |(value, source_id, registry_version, signatures_required, canonical_timestamp)| {
+            |(value, source_id, registry_version, signatures_required, timestamp)| {
                 AttestationPayload {
                     value,
                     source_id,
                     registry_version,
                     signatures_required,
-                    canonical_timestamp,
+                    timestamp,
                 }
             },
         )
@@ -250,7 +250,7 @@ proptest! {
     fn derive_selection_bitmap_is_deterministic(
         source_id in any::<[u8; 32]>(),
         registry_version in any::<u32>(),
-        canonical_timestamp in any::<u64>(),
+        timestamp in any::<u64>(),
         node_count in 1u32..=64,
         signatures_required in any::<u8>(),
         redundancy_buffer in any::<u8>(),
@@ -263,14 +263,14 @@ proptest! {
         };
         let a = derive_selection_bitmap(
             &source_id,
-            canonical_timestamp,
+            timestamp,
             signatures_required,
             &registry,
         )
         .unwrap();
         let b = derive_selection_bitmap(
             &source_id,
-            canonical_timestamp,
+            timestamp,
             signatures_required,
             &registry,
         )

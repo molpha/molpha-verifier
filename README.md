@@ -16,7 +16,7 @@ Given an [`AttestationPayload`](src/payload.rs) (or combined [`Attestation`](src
 3. Requires the supplied signer set to be exactly `popcount(signers_bitmap)` long
 4. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
 5. Reconstructs the coalition key `Σ X_i` from ordered signer pubkeys, normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
-6. Hashes the message (`MOLPHA_MESSAGE_V1` domain) over `source_id`, registry version, threshold, signers bitmap, raw `value` bytes, and canonical timestamp
+6. Hashes the message (`MOLPHA_MESSAGE_V1` domain, 141-byte preimage) over `value`, `source_id`, registry version, threshold, timestamp (unix milliseconds) and the signers bitmap
 7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
 
 Checks run cheapest-first, so a malformed attestation is rejected before it costs a selection derivation or a curve operation.
@@ -33,7 +33,7 @@ Content fields carried with the attestation:
 | `source_id` | `[u8; 32]` | Source identifier (often ASCII-padded) |
 | `registry_version` | `u32` | Registry snapshot referenced by the attestation |
 | `signatures_required` | `u8` | Threshold encoded in the payload |
-| `canonical_timestamp` | `u64` | Round timestamp; used in selection seed |
+| `timestamp` | `u64` | Gateway-assigned round time in unix **milliseconds**; selection reads `timestamp / SELECTION_WINDOW_MS` (1000), so sub-second precision never changes the committee. Use `timestamp_secs()` for chain-clock comparisons |
 
 ### `Attestation`
 
@@ -273,7 +273,7 @@ verify_with_coalition_key(&attestation, &ordered_signers, &registry, &key)?;
 | `pop` | Canonical secp256k1 node-key validation and proof-of-possession verification |
 | `verify` | High-level verify, coalition reconstruction, dispute helpers |
 | `onchain` | Snapshot signer resolution (`resolve_signers*`) over `RegistryView` / `NodeEntry` |
-| `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`) |
+| `selection` | Deterministic selection bitmap (`MOLPHA_SELECTION_V1`, 1 s window index) |
 | `message` | Molpha message hash (`MOLPHA_MESSAGE_V1`) |
 | `bitmap` | [`Bitmap`] (256-bit set) and deterministic group sampling |
 | `coalition` | secp256k1 point sum accumulator and the `CoalitionKey` input |

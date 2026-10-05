@@ -20,7 +20,16 @@ pub struct AttestationPayload {
     pub source_id: [u8; 32],
     pub registry_version: u32,
     pub signatures_required: u8,
-    pub canonical_timestamp: u64,
+    /// Gateway-assigned round time in unix **milliseconds**.
+    pub timestamp: u64,
+}
+
+impl AttestationPayload {
+    /// `timestamp` as unix seconds (floor), the unit of chain clocks, epoch windows and
+    /// registry activation times.
+    pub fn timestamp_secs(&self) -> u64 {
+        self.timestamp / 1_000
+    }
 }
 
 /// Aggregate Schnorr signature material.
@@ -73,7 +82,8 @@ mod tests {
         assert_eq!(decoded.value, VALUE);
         assert_eq!(decoded.registry_version, 12);
         assert_eq!(decoded.signatures_required, 5);
-        assert_eq!(decoded.canonical_timestamp, 1_705_257_421);
+        assert_eq!(decoded.timestamp, 1_705_257_421_000);
+        assert_eq!(decoded.timestamp_secs(), 1_705_257_421);
 
         let encoded = borsh::to_vec(&decoded).expect("encode payload");
         assert_eq!(encoded.as_slice(), PAYLOAD_BORSH.as_slice());

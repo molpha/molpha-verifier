@@ -182,8 +182,8 @@ mod tests {
     use super::*;
     use crate::bitmap::{for_each_set_bit, Bitmap};
     use crate::fixtures::{
-        CANONICAL_TIMESTAMP, COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT,
-        REGISTRY_VERSION, S, SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, VALUE,
+        COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT, REGISTRY_VERSION, S,
+        SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, TIMESTAMP, VALUE,
     };
     use crate::MAX_REGISTRY_NODES;
 
@@ -214,7 +214,7 @@ mod tests {
                 value: VALUE,
                 source_id: SOURCE_ID,
                 registry_version: REGISTRY_VERSION,
-                canonical_timestamp: CANONICAL_TIMESTAMP,
+                timestamp: TIMESTAMP,
                 signatures_required: SIGNATURES_REQUIRED,
             },
             signature: crate::payload::SchnorrSignature {

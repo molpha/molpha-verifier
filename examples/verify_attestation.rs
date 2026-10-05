@@ -43,10 +43,7 @@ fn main() -> Result<(), AttestationError> {
         "signatures_required:      {}",
         attestation.payload.signatures_required
     );
-    println!(
-        "canonical_timestamp:      {}",
-        attestation.payload.canonical_timestamp
-    );
+    println!("timestamp:               {}", attestation.payload.timestamp);
 
     let message_hash =
         compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);

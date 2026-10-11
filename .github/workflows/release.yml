@@ -32,6 +32,17 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      # cargo publish ships source, not CI binaries; bake the production program id into
+      # src/solana.rs so downstream builds match production Registry/Node owners.
+      - name: Bake production program id
+        run: |
+          program_id='${{ vars.PROGRAM_ID }}'
+          if [ -z "$program_id" ]; then
+            echo "::error::Repository variable PROGRAM_ID is not set."
+            exit 1
+          fi
+          sed -i "s/Pubkey::from_str_const(\"[^\"]*\")/Pubkey::from_str_const(\"${program_id}\")/" src/solana.rs
+
       - name: Test
         run: cargo test --all-features
 

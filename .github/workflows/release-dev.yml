@@ -54,6 +54,16 @@ jobs:
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Bake dev program id
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          program_id='${{ vars.DEV_PROGRAM_ID }}'
+          if [ -z "$program_id" ]; then
+            echo "::error::Repository variable DEV_PROGRAM_ID is not set."
+            exit 1
+          fi
+          sed -i "s/Pubkey::from_str_const(\"[^\"]*\")/Pubkey::from_str_const(\"${program_id}\")/" src/solana.rs
+
       - name: Test
         if: steps.changes.outputs.has_changes == 'true'
         run: cargo test --all-features

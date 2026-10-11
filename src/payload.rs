@@ -20,7 +20,7 @@ pub struct AttestationPayload {
     pub source_id: [u8; 32],
     pub registry_version: u32,
     pub signatures_required: u8,
-    /// Gateway-assigned round time in unix **milliseconds**.
+    /// Round time in unix **milliseconds**.
     pub timestamp: u64,
 }
 

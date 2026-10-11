@@ -66,8 +66,7 @@ pub const REGISTRY_ACCOUNT_LEN: usize = 8_208;
 /// Serialized `Node` account length including discriminator.
 pub const NODE_ACCOUNT_LEN: usize = 152;
 
-pub const PROGRAM_ID: Pubkey =
-    Pubkey::from_str_const("chivcFQgxzwkpLvW41PV431HQ4dYpaW3povQH3AdpQt");
+pub const PROGRAM_ID: Pubkey = Pubkey::from_str_const(env!("MOLPHA_PROGRAM_ID"));
 
 // Registry is zero_copy / repr(C): version(u32), node_count(u16), redundancy_buffer(u8), bump(u8),
 // then nodes[[u8;32]; 256]. Header is 8 bytes with no padding.

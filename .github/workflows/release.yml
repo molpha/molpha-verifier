@@ -15,6 +15,7 @@ env:
   RUSTFLAGS: -D warnings
   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
   CRATES_IO_USER_AGENT: molpha-verifier-ci (https://github.com/molpha/molpha-verifier)
+  MOLPHA_PROGRAM_ID: ${{ vars.PROGRAM_ID }}
 
 jobs:
   publish:

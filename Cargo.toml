@@ -1,6 +1,6 @@
 [package]
 name = "molpha-verifier"
-version = "0.3.1"
+version = "0.4.0"
 description = "Solana program library for verifying Molpha threshold-signed oracle updates"
 edition = "2021"
 license = "MIT"

@@ -723,6 +723,40 @@ mod tests {
         );
     }
 
+    /// A stored key that is not a curve point authorizes nothing: the proof fails as an invalid
+    /// authorization, not as an error the caller might mistake for something else.
+    #[test]
+    fn a_stored_key_off_the_curve_never_authorizes() {
+        let proof = rotation_proof(&PROGRAM, &NODE, &scalar(9), &scalar(10));
+        let mut off_curve = key_xy(&scalar(9));
+        off_curve.1[31] ^= 1;
+        for old_key in [([0u8; 32], [0u8; 32]), off_curve] {
+            assert_eq!(
+                verify_key_rotation(&PROGRAM, &NODE, &old_key, &proof),
+                Err(KeyRotationError::InvalidAuthorization)
+            );
+        }
+    }
+
+    /// The negation of the current key is another key, with its own secret: rotating to it is a
+    /// rotation like any other. (Holding both in one version would cancel them out of a coalition
+    /// sum, but a version holds one key per member, and taking another member's negation needs
+    /// that member's secret for the proof of possession.)
+    #[test]
+    fn rotating_to_the_negated_key_is_allowed() {
+        let mut negated = SECP256K1_ORDER;
+        negated[31] -= 9;
+        let (old_key, new_key) = (key_xy(&scalar(9)), key_xy(&negated));
+        assert_eq!(old_key.0, new_key.0);
+        assert_ne!(old_key.1, new_key.1);
+
+        let proof = rotation_proof(&PROGRAM, &NODE, &scalar(9), &negated);
+        assert_eq!(
+            verify_key_rotation(&PROGRAM, &NODE, &old_key, &proof),
+            Ok(new_key)
+        );
+    }
+
     #[test]
     fn rotation_vector_is_pinned() {
         // Deterministic keys and nonces, so other signers (CLI, node client) can reproduce it:

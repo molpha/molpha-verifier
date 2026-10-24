@@ -26,7 +26,7 @@ thiserror = ["dep:thiserror"]
 # raw Solana account adapters so consumers keep one validation path.
 anchor = ["solana", "dep:anchor-lang"]
 idl-build = ["anchor", "anchor-lang/idl-build"]
-# Account adapters: verify straight from `&AccountInfo` (registry + node accounts).
+# Account adapters: verify straight from the registry `&AccountInfo`.
 solana = [
     "dep:solana-account-info",
     "dep:solana-program-error",

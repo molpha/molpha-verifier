@@ -14,6 +14,12 @@
 //!    [`REGISTRY_MEMBER_LEN`]-byte member records, at most [`MAX_REGISTRY_NODES`] of them, and
 //!    `node_count` within that capacity
 //!
+//! [`verify_attestation`] also checks that the version was **not retired** by the round's
+//! timestamp, in seconds ([`RegistryAccount::retired_by`]). A superseded version keeps verifying
+//! rounds for its grace window only, so once a node rotates its key, the old key stops verifying
+//! fresh rounds when that window ends. The dispute path ([`verify_aggregate_over_hash_accounts`])
+//! does not check it: evidence signed under any version stays verifiable.
+//!
 //! Signer keys are validated as curve points when they are summed. Node status is not part of
 //! the snapshot; historical snapshots may still name deactivated nodes. A key rotation replaces
 //! a member's key in the next version only, so a snapshot keeps the key that signed under it.
@@ -67,7 +73,9 @@ pub const fn registry_account_len(capacity: usize) -> usize {
 // Registry is zero_copy / repr(C). After the 8-byte discriminator:
 // grace_active_until(i64), active_from(i64), version(u32), node_count(u16),
 // redundancy_buffer(u8), bump(u8), then members[capacity].
-const REGISTRY_VERSION_OFFSET: usize = DISCRIMINATOR_LEN + 16;
+const REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET: usize = DISCRIMINATOR_LEN;
+const REGISTRY_ACTIVE_FROM_OFFSET: usize = REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET + 8;
+const REGISTRY_VERSION_OFFSET: usize = REGISTRY_ACTIVE_FROM_OFFSET + 8;
 const REGISTRY_NODE_COUNT_OFFSET: usize = REGISTRY_VERSION_OFFSET + 4;
 const REGISTRY_REDUNDANCY_BUFFER_OFFSET: usize = REGISTRY_NODE_COUNT_OFFSET + 2;
 const REGISTRY_BUMP_OFFSET: usize = REGISTRY_REDUNDANCY_BUFFER_OFFSET + 1;
@@ -214,6 +222,38 @@ impl<'a> RegistryAccount<'a> {
         self.data[REGISTRY_BUMP_OFFSET]
     }
 
+    /// Unix seconds this version stops being active at, set when the next version is published;
+    /// `0` while it is the current one.
+    pub fn grace_active_until(&self) -> i64 {
+        i64::from_le_bytes(
+            self.data[REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET..REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET + 8]
+                .try_into()
+                .expect("length checked in load"),
+        )
+    }
+
+    /// Unix seconds this version was created at. It is not active before.
+    pub fn active_from(&self) -> i64 {
+        i64::from_le_bytes(
+            self.data[REGISTRY_ACTIVE_FROM_OFFSET..REGISTRY_ACTIVE_FROM_OFFSET + 8]
+                .try_into()
+                .expect("length checked in load"),
+        )
+    }
+
+    /// Whether the version's grace window had ended by `unix_secs`. The current version is never
+    /// retired.
+    pub fn retired_by(&self, unix_secs: i64) -> bool {
+        let grace_active_until = self.grace_active_until();
+        grace_active_until != 0 && grace_active_until <= unix_secs
+    }
+
+    /// Whether the version was active at `unix_secs`: created by then and not retired. This is
+    /// the program's rule for the time it checks a version at.
+    pub fn is_active_at(&self, unix_secs: i64) -> bool {
+        self.active_from() <= unix_secs && !self.retired_by(unix_secs)
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.data
     }
@@ -257,6 +297,12 @@ impl core::fmt::Debug for RegistryAccount<'_> {
 
 /// Verify an attestation from its `Registry` account.
 ///
+/// The version must not have been retired by the round's timestamp
+/// ([`RegistryAccount::retired_by`]), so a superseded version stops verifying new rounds when its
+/// grace window ends. A round dated slightly before the version was created is not refused: the
+/// round's stamp and the chain clock that dates versions may disagree by a few seconds.
+/// Freshness of the round itself is the caller's policy.
+///
 /// `coalition_key` is optional and untrusted; see [`crate::verify()`].
 pub fn verify_attestation(
     attestation: &Attestation,
@@ -264,6 +310,13 @@ pub fn verify_attestation(
     coalition_key: Option<&CoalitionKey>,
 ) -> Result<(), AccountError> {
     let registry = RegistryAccount::load(registry_account)?;
+    if attestation.payload.registry_version != registry.version() {
+        return Err(AttestationError::InvalidRegistryVersion.into());
+    }
+    let round_secs = i64::try_from(attestation.payload.timestamp_secs()).unwrap_or(i64::MAX);
+    if registry.retired_by(round_secs) {
+        return Err(AttestationError::RegistryRetired.into());
+    }
     Ok(verify(attestation, &registry.view(), coalition_key)?)
 }
 
@@ -748,6 +801,108 @@ mod tests {
             .unwrap_err(),
             AccountError::Attestation(AttestationError::InvalidSignersBitmap)
         );
+    }
+
+    fn set_liveness(data: &mut [u8], active_from: i64, grace_active_until: i64) {
+        data[REGISTRY_ACTIVE_FROM_OFFSET..REGISTRY_ACTIVE_FROM_OFFSET + 8]
+            .copy_from_slice(&active_from.to_le_bytes());
+        data[REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET..REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET + 8]
+            .copy_from_slice(&grace_active_until.to_le_bytes());
+    }
+
+    /// A version verifies a round unless its grace window had ended by the round's timestamp, in
+    /// seconds. A round dated before the version's creation is not refused for that.
+    #[test]
+    fn verify_attestation_refuses_a_version_retired_before_the_round() {
+        let round = (TIMESTAMP / 1_000) as i64;
+        for (active_from, grace_active_until, verifies, active) in [
+            (0, 0, true, true),
+            (round, 0, true, true),
+            (round + 1, 0, true, false),
+            (0, round + 1, true, true),
+            (0, round, false, false),
+            (0, round - 1, false, false),
+        ] {
+            let mut accounts = Accounts::new();
+            set_liveness(&mut accounts.registry_data, active_from, grace_active_until);
+            let info = accounts.registry();
+            let registry = RegistryAccount::load(&info).unwrap();
+            assert_eq!(
+                (registry.active_from(), registry.grace_active_until()),
+                (active_from, grace_active_until)
+            );
+            assert_eq!(registry.retired_by(round), !verifies);
+            assert_eq!(registry.is_active_at(round), active);
+            drop(registry);
+            let result = verify_attestation(&fixture_attestation(), &info, None);
+            if verifies {
+                result.unwrap_or_else(|e| {
+                    panic!("[{active_from}, {grace_active_until}) must verify: {e:?}")
+                });
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    AccountError::Attestation(AttestationError::RegistryRetired),
+                    "[{active_from}, {grace_active_until})"
+                );
+            }
+        }
+    }
+
+    /// Slashing evidence never expires: the dispute path verifies under a version whose grace
+    /// window ended long ago.
+    #[test]
+    fn dispute_path_ignores_liveness() {
+        let mut accounts = Accounts::new();
+        set_liveness(&mut accounts.registry_data, 0, 1);
+        let attestation = fixture_attestation();
+        let message_hash = attestation.message_hash();
+        let info = accounts.registry();
+        assert!(verify_aggregate_over_hash_accounts(
+            &info,
+            &attestation.signature,
+            &message_hash,
+            REGISTRY_VERSION,
+            None,
+        )
+        .unwrap());
+    }
+
+    /// The 0.3 layout, a fixed 256-address table of 8,208 bytes, is not a whole number of member
+    /// records, so it fails closed instead of being misread.
+    #[test]
+    fn a_registry_in_the_previous_layout_is_rejected() {
+        let mut data = vec![0u8; 8_208];
+        data[..DISCRIMINATOR_LEN].copy_from_slice(&REGISTRY_DISCRIMINATOR);
+        let key = registry_pda(REGISTRY_VERSION).0;
+        let mut lamports = 1u64;
+        let info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &PROGRAM_ID,
+            false,
+        );
+        assert_eq!(
+            RegistryAccount::load(&info).unwrap_err(),
+            AccountError::InvalidRegistryAccount
+        );
+    }
+
+    /// The genesis version has no members: a bare header.
+    #[test]
+    fn an_empty_registry_is_a_bare_header() {
+        let mut accounts = Accounts::with_capacity(0);
+        accounts.registry_data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
+            .copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(accounts.registry_data.len(), REGISTRY_HEADER_LEN);
+        let info = accounts.registry();
+        let registry = RegistryAccount::load(&info).unwrap();
+        assert!(registry.nodes().is_empty());
+        assert_eq!(registry.view().node_count, 0);
+        assert!(registry.node_key(0).is_err());
     }
 
     #[test]

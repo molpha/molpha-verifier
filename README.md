@@ -176,6 +176,9 @@ The account is checked before any field is trusted:
 | Anchor discriminator | `sha256("account:Registry")[..8]` |
 | Shape | `REGISTRY_HEADER_LEN` (32) bytes, then a whole number of 96-byte member records, at most `MAX_REGISTRY_NODES`; `node_count` within that capacity |
 | Body decode | fixed offsets (`zero_copy`): header fields, then the member table |
+| Not retired (`verify_attestation` only) | the version's grace window had not ended by the round's timestamp in seconds: `grace_active_until` is `0` or `> ts` (`RegistryAccount::retired_by`) |
+
+A superseded version keeps verifying rounds for its grace window only, so after a node rotates its key the old key stops verifying new rounds when that window ends; `verify_attestation` fails with `AttestationError::RegistryRetired`. A round dated slightly before the version was created is not refused, because the round's stamp and the chain clock that dates versions can disagree by a few seconds (`RegistryAccount::is_active_at` applies the program's full rule if you want it). The dispute path does not check this: evidence signed under any version stays verifiable here, and how late it may be filed is the program's policy (Molpha's closes one settlement window after the version's grace ends). Freshness of the round itself (`maxAge`) remains the caller's policy.
 
 The member table is the tail of the account and its capacity comes from the account length (`registry_account_len(capacity)`), so a program that grows or shrinks the table needs no verifier release. The Molpha program sizes each snapshot to exactly its members, from 32 bytes for an empty registry to 24,608 for a full one; records past `node_count` are never read. Signer keys are validated as curve points when they are summed. Node **status is not part of the snapshot** — a node deactivated in a later version remains valid evidence for a historical snapshot.
 
@@ -260,6 +263,27 @@ let signers = resolve_signers(&registry, &attestation.signature.signers_bitmap)?
 let key = coalition_key(&signers)?;
 verify(&attestation, &registry, Some(&key))?;
 ```
+
+## Migrating from 0.3
+
+0.4 matches a program in which every registry version stores its members' keys, and a node can rotate its key. Accounts in the 0.3 layout fail with `InvalidRegistryAccount`, so upgrade together with the program.
+
+- **No signer accounts.** Signer keys come from the registry version. Drop the `Node` accounts you passed after the registry.
+- `solana::verify_attestation(att, registry, Option<&CoalitionKey>)` replaces `verify_attestation` and `verify_attestation_with_coalition_key`, and now refuses a version retired before the round (see above).
+- `solana::verify_aggregate_over_hash_accounts(registry, &signature, hash, version, Option<&CoalitionKey>)` replaces both dispute adapters.
+- `verify(att, &registry, Option<&CoalitionKey>)` resolves signers from the view; `verify_with_coalition_key` is gone.
+- `resolve_signers(&registry, bitmap)` and `verify_aggregate_over_hash_resolved(registry, sig, hash, Option<&CoalitionKey>)` take no `NodeEntry` slice.
+- `RegistryView.nodes` is `&[NodeEntry]`, and `NodeEntry` is one member record `(node, x, y)`.
+- Removed:
+  - `resolve_intersected_signers`, `IntersectedResolution` and `verify_attestation_resolved*`
+  - `solana::resolve_signers_accounts` and `resolve_intersected_signers_accounts`
+  - `NodeEntry::load` and the `NODE_*` constants
+  - `REGISTRY_ACCOUNT_LEN`: use `registry_account_len(capacity)` and `REGISTRY_HEADER_LEN`
+- Errors:
+  - removed: `AttestationError::{SignerCountMismatch, MissingSignerAccount}` and `AccountError::{InvalidNodeAccount, InvalidNodePda}`
+  - added: `AttestationError::RegistryRetired`
+  - `AccountError` codes 0–4 are unchanged.
+- New: key rotation proofs (`verify_key_rotation`, `key_rotation_digest`, `KeyRotationProof`).
 
 ## Modules
 

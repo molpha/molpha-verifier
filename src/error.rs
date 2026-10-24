@@ -57,6 +57,13 @@ pub enum AttestationError {
         error("coalition key is not the sum of the signer keys")
     )]
     InvalidCoalitionKey,
+    /// The registry version's grace window had ended by the round's timestamp: it was
+    /// superseded, and no longer verifies new rounds.
+    #[cfg_attr(
+        feature = "thiserror",
+        error("registry version was retired before the round's timestamp")
+    )]
+    RegistryRetired,
 }
 
 #[cfg(all(test, feature = "thiserror"))]

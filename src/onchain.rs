@@ -1,210 +1,85 @@
-//! Signer resolution and verification over already-parsed registry data.
+//! Signer resolution and verification over an already-parsed registry snapshot.
 //!
-//! Framework-agnostic: the caller reads accounts and passes [`RegistryView`] + [`NodeEntry`]s.
-//! Each set bit of `signers_bitmap` binds to `registry.nodes[bit]`. Node status is ignored —
-//! a node deactivated later remains valid evidence for historical snapshots.
+//! Framework-agnostic: the caller reads the registry account and passes a [`RegistryView`]. Each
+//! set bit of a signers bitmap binds to `registry.nodes[bit]`, and its key comes from that
+//! member record. Node status is not part of the snapshot — a node deactivated later remains
+//! valid evidence for historical snapshots.
 
-use crate::verify::{
-    verify, verify_aggregate_over_hash, verify_aggregate_over_hash_with_coalition_key,
-    verify_with_coalition_key,
-};
+use crate::verify::{accumulate_registry_signers, compress_coalition, recover_and_match};
 use crate::{
     bitmap::{for_each_set_bit, Bitmap},
-    Attestation, AttestationError, CoalitionKey, NodeEntry, RegistryView, SchnorrSignature,
-    SignerXy,
+    scalar::secp256k1_scalar_is_valid_nonzero,
+    AttestationError, CoalitionKey, RegistryView, SchnorrSignature, SignerXy,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntersectedResolution {
-    pub signers_a: Vec<SignerXy>,
-    pub signers_b: Vec<SignerXy>,
-    pub intersected_bitmap: Bitmap,
-    pub unioned_bitmap: Bitmap,
-}
-
+/// Registry keys for the set bits of `signers_bitmap`, in ascending bit order.
+///
+/// Off-chain helper, e.g. to compute a [`CoalitionKey`] with [`crate::coalition_key`].
+/// Verification reads the registry directly and does not need it.
 pub fn resolve_signers(
-    nodes: &[NodeEntry],
     registry: &RegistryView<'_>,
     signers_bitmap: &[u8; 32],
 ) -> Result<Vec<SignerXy>, AttestationError> {
     let signers = Bitmap::load(signers_bitmap);
     let mut ordered = Vec::with_capacity(signers.popcount() as usize);
-
-    if nodes.len() != signers.popcount() as usize {
-        return Err(AttestationError::MissingSignerAccount);
-    }
-
-    let mut cursor = 0usize;
-    for_each_set_bit(signers, |bit_pos| {
-        if bit_pos >= registry.node_count as usize || bit_pos >= registry.nodes.len() {
-            return Err(AttestationError::InvalidSignersBitmap);
-        }
-
-        let entry = nodes
-            .get(cursor)
-            .ok_or(AttestationError::MissingSignerAccount)?;
-        if entry.account != registry.nodes[bit_pos] {
-            return Err(AttestationError::MissingSignerAccount);
-        }
-
-        cursor = cursor.saturating_add(1);
-        ordered.push((entry.x, entry.y));
+    for_each_set_bit(signers, |bit| {
+        ordered.push(registry.signer(bit)?.xy());
         Ok(())
     })?;
-
     Ok(ordered)
 }
 
-pub fn resolve_intersected_signers(
-    nodes: &[NodeEntry],
-    registry: &RegistryView,
-    bitmap_a: &[u8; 32],
-    bitmap_b: &[u8; 32],
-) -> Result<IntersectedResolution, AttestationError> {
-    let signers_a = Bitmap::load(bitmap_a);
-    let signers_b = Bitmap::load(bitmap_b);
-    let intersected = signers_a.intersect(&signers_b);
-    let unioned = signers_a.union(&signers_b);
-
-    if nodes.len() != unioned.popcount() as usize {
-        return Err(AttestationError::MissingSignerAccount);
-    }
-
-    let mut cursor = 0usize;
-    let mut ordered_a = Vec::with_capacity(intersected.popcount() as usize);
-    let mut ordered_b = Vec::with_capacity(intersected.popcount() as usize);
-
-    for_each_set_bit(unioned, |bit_pos| {
-        if bit_pos >= registry.node_count as usize || bit_pos >= registry.nodes.len() {
-            return Err(AttestationError::InvalidSignersBitmap);
-        }
-
-        let entry = nodes
-            .get(cursor)
-            .ok_or(AttestationError::MissingSignerAccount)?;
-        if entry.account != registry.nodes[bit_pos] {
-            return Err(AttestationError::MissingSignerAccount);
-        }
-
-        cursor = cursor.saturating_add(1);
-
-        if signers_a.bit_set(bit_pos) {
-            ordered_a.push((entry.x, entry.y));
-        }
-        if signers_b.bit_set(bit_pos) {
-            ordered_b.push((entry.x, entry.y));
-        }
-
-        Ok(())
-    })?;
-
-    let resolution = IntersectedResolution {
-        signers_a: ordered_a,
-        signers_b: ordered_b,
-        intersected_bitmap: intersected,
-        unioned_bitmap: unioned,
-    };
-
-    Ok(resolution)
-}
-
-/// Verify an attestation after resolving signers against a registry snapshot.
-pub fn verify_attestation_resolved(
-    attestation: &Attestation,
-    registry: &RegistryView<'_>,
-    nodes: &[NodeEntry],
-) -> Result<(), AttestationError> {
-    if attestation.payload.registry_version != registry.version {
-        return Err(AttestationError::InvalidRegistryVersion);
-    }
-
-    let ordered_signers = resolve_signers(nodes, registry, &attestation.signature.signers_bitmap)?;
-
-    verify(attestation, &ordered_signers, registry)
-}
-
-/// [`verify_attestation_resolved`] with the affine coalition key supplied (see
-/// [`crate::verify_with_coalition_key`]).
-pub fn verify_attestation_resolved_with_coalition_key(
-    attestation: &Attestation,
-    registry: &RegistryView<'_>,
-    nodes: &[NodeEntry],
-    coalition_key: &CoalitionKey,
-) -> Result<(), AttestationError> {
-    if attestation.payload.registry_version != registry.version {
-        return Err(AttestationError::InvalidRegistryVersion);
-    }
-
-    let ordered_signers = resolve_signers(nodes, registry, &attestation.signature.signers_bitmap)?;
-
-    verify_with_coalition_key(attestation, &ordered_signers, registry, coalition_key)
-}
-
-/// Verify an aggregate over an arbitrary message hash after resolving signers.
+/// Verify an aggregate over an arbitrary message hash, with signer keys from `registry`.
 ///
-/// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed input.
+/// `Ok(true)` = valid, `Ok(false)` = invalid (slashable), `Err` = malformed input: an empty
+/// bitmap, a bit outside the registry, an invalid registry key, or a wrong `coalition_key`.
+/// Signers are resolved before the scalar check, so bad input never yields a verdict.
 pub fn verify_aggregate_over_hash_resolved(
     registry: &RegistryView<'_>,
     signature: &SchnorrSignature,
     message_hash: &[u8; 32],
-    nodes: &[NodeEntry],
+    coalition_key: Option<&CoalitionKey>,
 ) -> Result<bool, AttestationError> {
-    let ordered_signers = resolve_signers(nodes, registry, &signature.signers_bitmap)?;
-    verify_aggregate_over_hash(
+    let coalition = accumulate_registry_signers(registry, &signature.signers_bitmap)?;
+    if !secp256k1_scalar_is_valid_nonzero(&signature.agg_sig_s) {
+        return Ok(false);
+    }
+    let x_coalition = compress_coalition(&coalition, coalition_key)?;
+    Ok(recover_and_match(
+        &x_coalition,
+        message_hash,
         &signature.agg_sig_s,
         &signature.commitment,
-        message_hash,
-        &ordered_signers,
-    )
-}
-
-/// [`verify_aggregate_over_hash_resolved`] with the affine coalition key supplied (see
-/// [`crate::verify_aggregate_over_hash_with_coalition_key`]).
-pub fn verify_aggregate_over_hash_resolved_with_coalition_key(
-    registry: &RegistryView<'_>,
-    signature: &SchnorrSignature,
-    message_hash: &[u8; 32],
-    nodes: &[NodeEntry],
-    coalition_key: &CoalitionKey,
-) -> Result<bool, AttestationError> {
-    let ordered_signers = resolve_signers(nodes, registry, &signature.signers_bitmap)?;
-    verify_aggregate_over_hash_with_coalition_key(
-        &signature.agg_sig_s,
-        &signature.commitment,
-        message_hash,
-        &ordered_signers,
-        coalition_key,
-    )
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitmap::{for_each_set_bit, Bitmap};
     use crate::fixtures::{
         COMMITMENT, PUBKEYS, REDUNDANCY_BUFFER, REGISTERED_NODE_COUNT, REGISTRY_VERSION, S,
         SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, TIMESTAMP, VALUE,
     };
-    use crate::MAX_REGISTRY_NODES;
+    use crate::{Attestation, NodeEntry, MAX_REGISTRY_NODES};
 
-    fn fixture_nodes() -> [[u8; 32]; MAX_REGISTRY_NODES] {
-        let mut nodes = [[0u8; 32]; MAX_REGISTRY_NODES];
-        for (i, node) in nodes
-            .iter_mut()
-            .enumerate()
-            .take(REGISTERED_NODE_COUNT as usize)
-        {
-            *node = [i as u8; 32];
+    fn fixture_nodes() -> Vec<NodeEntry> {
+        let mut nodes = vec![NodeEntry::default(); MAX_REGISTRY_NODES];
+        for (i, (x, y)) in PUBKEYS.iter().enumerate() {
+            nodes[i] = NodeEntry {
+                account: [i as u8; 32],
+                x: *x,
+                y: *y,
+            };
         }
         nodes
     }
 
-    fn fixture_registry(nodes: &[[u8; 32]; MAX_REGISTRY_NODES]) -> RegistryView<'_> {
+    fn fixture_registry(nodes: &[NodeEntry]) -> RegistryView<'_> {
         RegistryView {
             version: REGISTRY_VERSION,
             node_count: REGISTERED_NODE_COUNT as u16,
             redundancy_buffer: REDUNDANCY_BUFFER,
-            nodes: &nodes[..],
+            nodes,
         }
     }
 
@@ -217,7 +92,7 @@ mod tests {
                 timestamp: TIMESTAMP,
                 signatures_required: SIGNATURES_REQUIRED,
             },
-            signature: crate::payload::SchnorrSignature {
+            signature: SchnorrSignature {
                 agg_sig_s: S,
                 commitment: COMMITMENT,
                 signers_bitmap: SIGNERS_BITMAP,
@@ -225,169 +100,132 @@ mod tests {
         }
     }
 
-    fn fixture_entries(nodes: &[[u8; 32]; MAX_REGISTRY_NODES]) -> Vec<NodeEntry> {
-        let mut entries = Vec::new();
-        for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |bit_pos| {
-            let (x, y) = PUBKEYS[bit_pos];
-            entries.push(NodeEntry {
-                account: nodes[bit_pos],
-                x,
-                y,
-            });
+    #[test]
+    fn resolve_signers_reads_keys_in_bit_order() {
+        let nodes = fixture_nodes();
+        let ordered = resolve_signers(&fixture_registry(&nodes), &SIGNERS_BITMAP).unwrap();
+        let mut expected = Vec::new();
+        for_each_set_bit(Bitmap::load(&SIGNERS_BITMAP), |bit| {
+            expected.push(PUBKEYS[bit]);
             Ok::<(), AttestationError>(())
         })
         .unwrap();
-        entries
-    }
-
-    #[test]
-    fn resolve_signers_accepts_evm_fixture() {
-        let nodes_array = fixture_nodes();
-        let registry = fixture_registry(&nodes_array);
-        let entries = fixture_entries(&nodes_array);
-        let ordered =
-            resolve_signers(&entries, &registry, &SIGNERS_BITMAP).expect("fixture must resolve");
-        assert_eq!(ordered.len(), entries.len());
+        assert_eq!(ordered, expected);
     }
 
     #[test]
     fn resolve_rejects_out_of_range_bit() {
-        let mut nodes_array = [[0u8; 32]; MAX_REGISTRY_NODES];
-        nodes_array[0] = [1u8; 32];
+        let nodes = fixture_nodes();
         let registry = RegistryView {
-            version: 0,
             node_count: 4,
-            redundancy_buffer: 0,
-            nodes: &nodes_array[..],
+            ..fixture_registry(&nodes)
         };
         let mut bm = Bitmap::EMPTY;
         bm.set_bit(5);
-        let signers_bitmap = bm.to_bytes();
-
-        let entries = [NodeEntry {
-            account: [1u8; 32],
-            x: [2u8; 32],
-            y: [3u8; 32],
-        }];
-
-        let err = resolve_signers(&entries, &registry, &signers_bitmap).unwrap_err();
-        assert_eq!(err, AttestationError::InvalidSignersBitmap);
+        assert_eq!(
+            resolve_signers(&registry, &bm.to_bytes()).unwrap_err(),
+            AttestationError::InvalidSignersBitmap
+        );
     }
 
     #[test]
-    fn resolve_rejects_bit_beyond_supplied_nodes_slice() {
-        let nodes_array = [[1u8; 32]; 1];
+    fn resolve_rejects_bit_beyond_member_table() {
+        let nodes = [NodeEntry::default(); 1];
         let registry = RegistryView {
             version: 0,
             node_count: 4,
             redundancy_buffer: 0,
-            nodes: &nodes_array,
+            nodes: &nodes,
         };
         let mut bm = Bitmap::EMPTY;
         bm.set_bit(2);
-        let signers_bitmap = bm.to_bytes();
-
-        let entries = [NodeEntry {
-            account: [1u8; 32],
-            x: [2u8; 32],
-            y: [3u8; 32],
-        }];
-
-        let err = resolve_signers(&entries, &registry, &signers_bitmap).unwrap_err();
-        assert_eq!(err, AttestationError::InvalidSignersBitmap);
-
-        let err =
-            resolve_intersected_signers(&entries, &registry, &signers_bitmap, &signers_bitmap)
-                .unwrap_err();
-        assert_eq!(err, AttestationError::InvalidSignersBitmap);
+        assert_eq!(
+            resolve_signers(&registry, &bm.to_bytes()).unwrap_err(),
+            AttestationError::InvalidSignersBitmap
+        );
     }
 
     #[test]
-    fn resolve_rejects_wrong_account() {
-        let nodes_array = fixture_nodes();
-        let registry = fixture_registry(&nodes_array);
-        let mut entries = fixture_entries(&nodes_array);
-        entries[0].account = [0xff; 32];
-
-        let err = resolve_signers(&entries, &registry, &SIGNERS_BITMAP).unwrap_err();
-        assert_eq!(err, AttestationError::MissingSignerAccount);
-    }
-
-    #[test]
-    fn resolve_rejects_missing_or_extra_entries() {
-        let nodes_array = fixture_nodes();
-        let registry = fixture_registry(&nodes_array);
-        let entries = fixture_entries(&nodes_array);
-
-        let err =
-            resolve_signers(&entries[..entries.len() - 1], &registry, &SIGNERS_BITMAP).unwrap_err();
-        assert_eq!(err, AttestationError::MissingSignerAccount);
-
-        let mut extra = entries.clone();
-        extra.push(NodeEntry {
-            account: [0u8; 32],
-            x: [0u8; 32],
-            y: [0u8; 32],
-        });
-        let err = resolve_signers(&extra, &registry, &SIGNERS_BITMAP).unwrap_err();
-        assert_eq!(err, AttestationError::MissingSignerAccount);
-    }
-
-    #[test]
-    fn verify_attestation_resolved_accepts_fixture() {
-        let nodes_array = fixture_nodes();
-        let registry = fixture_registry(&nodes_array);
+    fn aggregate_over_hash_resolved_roundtrip() {
+        let nodes = fixture_nodes();
+        let registry = fixture_registry(&nodes);
         let attestation = fixture_attestation();
-        let entries = fixture_entries(&nodes_array);
-        verify_attestation_resolved(&attestation, &registry, &entries)
-            .expect("resolved-path fixture must verify");
+        let message_hash = attestation.message_hash();
+        let signature = &attestation.signature;
+
+        assert_eq!(
+            verify_aggregate_over_hash_resolved(&registry, signature, &message_hash, None),
+            Ok(true)
+        );
+
+        let mut bad_hash = message_hash;
+        bad_hash[0] ^= 0xff;
+        assert_eq!(
+            verify_aggregate_over_hash_resolved(&registry, signature, &bad_hash, None),
+            Ok(false)
+        );
     }
 
     #[test]
-    fn verify_resolved_with_coalition_key_accepts_fixture_and_rejects_bad_key() {
-        let nodes_array = fixture_nodes();
-        let registry = fixture_registry(&nodes_array);
+    fn aggregate_over_hash_resolved_checks_the_coalition_key() {
+        let nodes = fixture_nodes();
+        let registry = fixture_registry(&nodes);
         let attestation = fixture_attestation();
-        let entries = fixture_entries(&nodes_array);
-        let signers = resolve_signers(&entries, &registry, &SIGNERS_BITMAP).unwrap();
+        let message_hash = attestation.message_hash();
+        let signers = resolve_signers(&registry, &SIGNERS_BITMAP).unwrap();
         let key = crate::coalition_key(&signers).unwrap();
-        verify_attestation_resolved_with_coalition_key(&attestation, &registry, &entries, &key)
-            .expect("keyed resolved path must verify");
-        assert!(verify_aggregate_over_hash_resolved_with_coalition_key(
-            &registry,
-            &attestation.signature,
-            &attestation.message_hash(),
-            &entries,
-            &key,
-        )
-        .unwrap());
+
+        assert_eq!(
+            verify_aggregate_over_hash_resolved(
+                &registry,
+                &attestation.signature,
+                &message_hash,
+                Some(&key)
+            ),
+            Ok(true)
+        );
 
         let mut bad = key;
         bad.x[0] ^= 0x01;
         assert_eq!(
-            verify_attestation_resolved_with_coalition_key(&attestation, &registry, &entries, &bad),
-            Err(AttestationError::InvalidCoalitionKey)
-        );
-        assert_eq!(
-            verify_aggregate_over_hash_resolved_with_coalition_key(
+            verify_aggregate_over_hash_resolved(
                 &registry,
                 &attestation.signature,
-                &attestation.message_hash(),
-                &entries,
-                &bad,
+                &message_hash,
+                Some(&bad)
             ),
             Err(AttestationError::InvalidCoalitionKey)
         );
     }
 
     #[test]
-    fn verify_attestation_resolved_rejects_version_mismatch() {
-        let nodes_array = fixture_nodes();
-        let mut registry = fixture_registry(&nodes_array);
-        registry.version = REGISTRY_VERSION + 1;
+    fn invalid_scalar_is_a_verdict_but_bad_bitmap_is_an_error() {
+        let nodes = fixture_nodes();
+        let registry = fixture_registry(&nodes);
         let attestation = fixture_attestation();
-        let entries = fixture_entries(&nodes_array);
-        let err = verify_attestation_resolved(&attestation, &registry, &entries).unwrap_err();
-        assert_eq!(err, AttestationError::InvalidRegistryVersion);
+        let message_hash = attestation.message_hash();
+
+        let mut signature = attestation.signature.clone();
+        signature.agg_sig_s = [0xff; 32];
+        assert_eq!(
+            verify_aggregate_over_hash_resolved(&registry, &signature, &message_hash, None),
+            Ok(false)
+        );
+
+        // A bit outside the registry must error even with an invalid scalar: no slashable
+        // verdict on malformed input.
+        let mut out_of_range = Bitmap::load(&signature.signers_bitmap);
+        out_of_range.set_bit(REGISTERED_NODE_COUNT as usize);
+        signature.signers_bitmap = out_of_range.to_bytes();
+        assert_eq!(
+            verify_aggregate_over_hash_resolved(&registry, &signature, &message_hash, None),
+            Err(AttestationError::InvalidSignersBitmap)
+        );
+
+        signature.signers_bitmap = [0u8; 32];
+        assert_eq!(
+            verify_aggregate_over_hash_resolved(&registry, &signature, &message_hash, None),
+            Err(AttestationError::InvalidSignersBitmap)
+        );
     }
 }

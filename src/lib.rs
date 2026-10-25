@@ -2,12 +2,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //!
 //! Framework-agnostic: the caller owns registry account types and passes plain data.
-//! Verify via [`verify()`] (resolved pubkeys) or [`verify_attestation_resolved`]
-//! ([`RegistryView`] + [`NodeEntry`]s). [`resolve_signers`] binds each set bit of the signers
-//! bitmap to `registry.nodes[bit]`.
+//! Verify via [`verify()`] with a [`RegistryView`] of the registry snapshot the attestation
+//! names. Each member of the snapshot ([`NodeEntry`]) carries the node's account address and
+//! secp256k1 key, and each set bit of the signers bitmap binds to `registry.nodes[bit]`, so
+//! signers are resolved from the snapshot itself.
 //!
 //! With the `solana` feature, [`solana`] accepts `&AccountInfo` and performs owner /
-//! discriminator / length checks before verifying.
+//! discriminator / shape checks before verifying.
 //! With the `anchor` feature, attestation types implement Anchor serialization and account
 //! adapter errors convert directly into `anchor_lang::error::Error`.
 //!
@@ -15,8 +16,8 @@
 //! ```ignore
 //! use molpha_verifier::{verify, Attestation};
 //!
-//! // `ordered_signers`: (x, y) pubkeys in ascending signers_bitmap bit order.
-//! verify(&attestation, &ordered_signers, &registry)?;
+//! // `registry.nodes`: the snapshot's member table; `coalition_key` is optional.
+//! verify(&attestation, &registry, Some(&coalition_key))?;
 //! ```
 
 #[doc(hidden)]
@@ -50,12 +51,15 @@ pub use partial::{verify_partial_signature_equation, NonceEquationError};
 pub use payload::Attestation;
 pub use payload::AttestationPayload;
 pub use payload::SchnorrSignature;
-pub use pop::{validate_key_and_verify_pop, NodePopError, NODE_POP_PREFIX};
+pub use pop::{
+    key_rotation_digest, validate_key_and_verify_pop, verify_key_rotation, KeyRotationError,
+    KeyRotationProof, NodePopError, NODE_KEY_ROTATION_PREFIX, NODE_POP_PREFIX,
+};
 pub use state::*;
 
 pub use verify::{
     coalition_key, reconstruct_coalition_key, verify, verify_aggregate_over_hash,
-    verify_aggregate_over_hash_with_coalition_key, verify_with_coalition_key,
+    verify_aggregate_over_hash_with_coalition_key,
 };
 
 pub use bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};

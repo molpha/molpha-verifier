@@ -30,10 +30,10 @@ pub enum AttestationError {
         error("signers_bitmap is not a subset of the derived selection bitmap")
     )]
     SignersNotSubsetOfSelection,
-    /// Bits set outside `[0, node_count)`, or otherwise invalid bitmap.
+    /// Empty bitmap, bits set outside `[0, node_count)` or the registry's member table.
     #[cfg_attr(
         feature = "thiserror",
-        error("invalid signers_bitmap (bits outside [0, node_count) or malformed)")
+        error("invalid signers_bitmap (empty, or bits outside the registry)")
     )]
     InvalidSignersBitmap,
     /// Selection derivation failed (bad parameters or sampling did not converge).
@@ -42,25 +42,13 @@ pub enum AttestationError {
         error("selection-group bitmap derivation failed")
     )]
     GroupBitmapDerivationFailed,
-    /// `ordered_signers.len()` ≠ `popcount(signers_bitmap)`.
-    #[cfg_attr(
-        feature = "thiserror",
-        error("ordered_signers.len() does not match popcount(signers_bitmap)")
-    )]
-    SignerCountMismatch,
     /// Attestation registry version does not match the snapshot.
     #[cfg_attr(feature = "thiserror", error("invalid registry version"))]
     InvalidRegistryVersion,
-    /// Signer account missing, extra, or does not match the registry slot.
+    /// Node index outside the registry's populated members.
     #[cfg_attr(
         feature = "thiserror",
-        error("signer account missing, extra, or does not match the registry slot")
-    )]
-    MissingSignerAccount,
-    /// `Node` account index does not match the bitmap.
-    #[cfg_attr(
-        feature = "thiserror",
-        error("node account index does not match bitmap")
+        error("node index is outside the registry's populated members")
     )]
     InvalidNodeIndex,
     /// Supplied coalition key is non-canonical or is not the affine sum of the signer keys.
@@ -69,6 +57,13 @@ pub enum AttestationError {
         error("coalition key is not the sum of the signer keys")
     )]
     InvalidCoalitionKey,
+    /// The registry version's grace window had ended by the round's timestamp: it was
+    /// superseded, and no longer verifies new rounds.
+    #[cfg_attr(
+        feature = "thiserror",
+        error("registry version was retired before the round's timestamp")
+    )]
+    RegistryRetired,
 }
 
 #[cfg(all(test, feature = "thiserror"))]

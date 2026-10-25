@@ -7,7 +7,6 @@
 
 use borsh::BorshDeserialize;
 use molpha_verifier::{
-    bitmap::{for_each_set_bit, Bitmap},
     compute_message_hash, fixtures, verify, Attestation, AttestationError, AttestationPayload,
     SchnorrSignature,
 };
@@ -49,21 +48,24 @@ fn main() -> Result<(), AttestationError> {
         compute_message_hash(&attestation.payload, attestation.signature.signers_bitmap);
     println!("message_hash:             0x{}", hex_encode(&message_hash));
 
-    // Ordered (x, y) pubkeys in ascending signers_bitmap bit order.
-    let mut ordered_signers = Vec::new();
-    for_each_set_bit(Bitmap::load(&fixtures::SIGNERS_BITMAP), |i| {
-        ordered_signers.push(fixtures::PUBKEYS[i]);
-        Ok::<(), std::convert::Infallible>(())
-    })
-    .unwrap();
+    // The registry snapshot's member table: account address and (x, y) key per bit.
+    let nodes: Vec<molpha_verifier::NodeEntry> = fixtures::PUBKEYS
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| molpha_verifier::NodeEntry {
+            account: [i as u8; 32],
+            x: *x,
+            y: *y,
+        })
+        .collect();
 
     let registry = molpha_verifier::RegistryView {
         version: fixtures::REGISTRY_VERSION,
         node_count: fixtures::REGISTERED_NODE_COUNT as u16,
         redundancy_buffer: fixtures::REDUNDANCY_BUFFER,
-        nodes: &[],
+        nodes: &nodes,
     };
-    verify(&attestation, &ordered_signers, &registry)?;
+    verify(&attestation, &registry, None)?;
 
     println!("aggregate Schnorr signature: OK");
     Ok(())

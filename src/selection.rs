@@ -2,7 +2,7 @@
 
 use solana_keccak_hasher::hashv;
 
-use crate::bitmap::{derive_group_bitmap, effective_selection_size, Bitmap};
+use crate::bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};
 use crate::error::AttestationError;
 use crate::RegistryView;
 
@@ -23,6 +23,14 @@ pub const SELECTION_WINDOW_MS: u64 = 1_000;
 /// SELECTION_WINDOW_MS`,
 /// `seed = keccak(SELECTION_SEED_PREFIX, source_id, registry_version_be, window_be)`,
 /// then [`derive_group_bitmap`] with [`effective_selection_size`].
+///
+/// The draw runs over the **live** members: `n` is [`RegistryView::live_count`], not the slot
+/// count, and the `r`-th selected rank maps to the slot of the `r`-th live member. Without holes
+/// the ranks are the slots, so the result is the plain sampler output. The registry's member table
+/// must be present for a snapshot that has holes.
+///
+/// Selection is for load balancing, slashing and activity tracking. [`crate::verify`] does not
+/// use it.
 pub fn derive_selection_bitmap(
     source_id: &[u8; 32],
     timestamp: u64,
@@ -38,15 +46,40 @@ pub fn derive_selection_bitmap(
         selection_window_bytes.as_ref(),
     ])
     .to_bytes();
-    let selection_size = effective_selection_size(
-        signatures_required,
-        registry.redundancy_buffer,
-        registry.node_count as u32,
-    );
-    derive_group_bitmap(&selection_seed, registry.node_count as u32, selection_size)
+    let live = registry.live_slots();
+    let live_count = live.len() as u32;
+    let selection_size =
+        effective_selection_size(signatures_required, registry.redundancy_buffer, live_count);
+    let ranks = derive_group_bitmap(&selection_seed, live_count, selection_size)?;
+    if live_count == u32::from(registry.node_count) {
+        return Ok(ranks);
+    }
+    let mut slots = Bitmap::EMPTY;
+    for_each_set_bit(ranks, |rank| {
+        let slot = live
+            .slot(rank)
+            .ok_or(AttestationError::GroupBitmapDerivationFailed)?;
+        slots.set_bit(slot);
+        Ok(())
+    })?;
+    Ok(slots)
 }
 
-/// Selection / threshold checks shared by attestation verification.
+/// The quorum rule `verify` enforces: a non-empty signer set of at least `signatures_required`.
+#[inline(always)]
+pub fn check_quorum(signers: &Bitmap, signatures_required: u8) -> Result<(), AttestationError> {
+    let signer_count = signers.popcount();
+    if signer_count == 0 {
+        return Err(AttestationError::InvalidSignersBitmap);
+    }
+    if signer_count < u32::from(signatures_required) {
+        return Err(AttestationError::InsufficientSigners);
+    }
+    Ok(())
+}
+
+/// Selection / threshold checks for callers that police the committee: slashing evidence and
+/// activity tracking. [`crate::verify`] does not call this.
 ///
 /// Returns `Ok(true)` when `signers ⊆ expected_selection` and counts match; `Ok(false)` when the
 /// bitmap is a strict superset of the allowed selection. Structural problems surface as `Err`.
@@ -58,13 +91,7 @@ pub fn verify_selection(
     signers_bitmap: &[u8; 32],
 ) -> Result<bool, AttestationError> {
     let signers = Bitmap::load(signers_bitmap);
-    let signer_count = signers.popcount();
-    if signer_count == 0 {
-        return Err(AttestationError::InvalidSignersBitmap);
-    }
-    if signer_count < u32::from(signatures_required) {
-        return Err(AttestationError::InsufficientSigners);
-    }
+    check_quorum(&signers, signatures_required)?;
 
     let expected_selection_bitmap =
         derive_selection_bitmap(source_id, timestamp, signatures_required, registry)?;
@@ -121,5 +148,96 @@ mod tests {
             differing >= 14,
             "only {differing}/16 window edges changed the committee"
         );
+    }
+
+    fn members(live: &[bool]) -> Vec<crate::NodeEntry> {
+        live.iter()
+            .enumerate()
+            .map(|(i, live)| crate::NodeEntry {
+                account: if *live { [i as u8 + 1; 32] } else { [0; 32] },
+                ..crate::NodeEntry::default()
+            })
+            .collect()
+    }
+
+    fn view<'a>(version: u32, nodes: &'a [crate::NodeEntry], buffer: u8) -> RegistryView<'a> {
+        RegistryView {
+            version,
+            node_count: nodes.len() as u16,
+            redundancy_buffer: buffer,
+            nodes,
+        }
+    }
+
+    #[test]
+    fn a_registry_without_holes_selects_as_before() {
+        let source = [3u8; 32];
+        let nodes = members(&[true; 12]);
+        let dense = derive_selection_bitmap(&source, 1_705_257_421_000, 5, &view(3, &nodes, 2));
+        let bare = derive_selection_bitmap(&source, 1_705_257_421_000, 5, &registry_with(3, 12));
+        assert_eq!(dense.unwrap().to_bytes(), bare.unwrap().to_bytes());
+    }
+
+    fn registry_with(version: u32, node_count: u16) -> RegistryView<'static> {
+        RegistryView {
+            version,
+            node_count,
+            redundancy_buffer: 2,
+            nodes: &[],
+        }
+    }
+
+    #[test]
+    fn holes_are_never_selected_and_the_committee_keeps_its_size() {
+        let mut live = vec![true; 20];
+        for hole in [0, 4, 5, 13] {
+            live[hole] = false;
+        }
+        let nodes = members(&live);
+        for w in 0..64u64 {
+            let selection = derive_selection_bitmap(
+                &[w as u8; 32],
+                w * SELECTION_WINDOW_MS,
+                5,
+                &view(9, &nodes, 2),
+            )
+            .unwrap();
+            assert_eq!(selection.popcount(), 7, "window {w}");
+            for hole in [0usize, 4, 5, 13] {
+                assert!(!selection.bit_set(hole), "window {w} selected hole {hole}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_committee_is_the_dense_draw_mapped_through_the_live_slots() {
+        let live = [
+            true, false, true, true, false, true, true, true, false, true, true, true,
+        ];
+        let nodes = members(&live);
+        let registry = view(5, &nodes, 2);
+        let live_slots: Vec<usize> = (0..live.len()).filter(|i| live[*i]).collect();
+        for w in 0..32u64 {
+            let source = [w as u8; 32];
+            let timestamp = (1_700_000_000 + w) * SELECTION_WINDOW_MS;
+            let got = derive_selection_bitmap(&source, timestamp, 3, &registry).unwrap();
+            // A registry of just the live members, in the same order, draws the same ranks.
+            let packed = members(&vec![true; live_slots.len()]);
+            let ranks =
+                derive_selection_bitmap(&source, timestamp, 3, &view(5, &packed, 2)).unwrap();
+            let mut expected = Bitmap::EMPTY;
+            for (rank, slot) in live_slots.iter().enumerate() {
+                if ranks.bit_set(rank) {
+                    expected.set_bit(*slot);
+                }
+            }
+            assert_eq!(got.to_bytes(), expected.to_bytes(), "window {w}");
+        }
+    }
+
+    #[test]
+    fn a_registry_with_no_live_member_selects_nothing() {
+        let nodes = members(&[false; 4]);
+        assert!(derive_selection_bitmap(&[1; 32], 0, 1, &view(1, &nodes, 1)).is_err());
     }
 }

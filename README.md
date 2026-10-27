@@ -13,13 +13,16 @@ Given an [`Attestation`](src/payload.rs) (payload plus [`SchnorrSignature`](src/
 
 1. Requires `attestation.payload.registry_version == registry.version`
 2. Rejects an invalid / zero aggregate scalar `s`
-3. Enforces `popcount(signers_bitmap) ≥ signatures_required`
-4. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
-5. Reconstructs the coalition key `Σ X_i` from the snapshot's member keys (`registry.nodes[bit]` for each set bit), normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
-6. Hashes the message (`MOLPHA_MESSAGE_V1` domain, 141-byte preimage) over `value`, `source_id`, registry version, threshold, timestamp (unix milliseconds) and the signers bitmap
-7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
+3. Enforces `popcount(signers_bitmap) ≥ signatures_required`, and that every set bit is a live slot of the snapshot (in range, not a hole)
+4. Reconstructs the coalition key `Σ X_i` from the snapshot's member keys (`registry.nodes[bit]` for each set bit), normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
+5. Hashes the message (`MOLPHA_MESSAGE_V1` domain, 141-byte preimage) over `value`, `source_id`, registry version, threshold, timestamp (unix milliseconds) and the signers bitmap
+6. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
 
-Checks run cheapest-first, so a malformed attestation is rejected before it costs a selection derivation or a curve operation.
+Checks run cheapest-first, so a malformed attestation is rejected before it costs a curve operation.
+
+**Selection is not part of verification.** Any `signatures_required` registered members may sign; the verifier no longer requires `signers ⊆ selection`. The committee (`derive_selection_bitmap`, `MOLPHA_SELECTION_V1`) is a load-balancing device: gateways and nodes use it to decide who runs a round, and a program uses it to police that (slashing unsolicited signers) and to track activity (who was selected, who signed). [`derive_selection_bitmap`](src/selection.rs) and [`verify_selection`](src/selection.rs) remain for those callers.
+
+**Slots are stable.** Removing a node leaves a hole (an all-zero `NodeEntry`) instead of moving the last member into its slot, so a member keeps its signer bit for as long as it is in a snapshot. `RegistryView::node_count` is the number of slots, holes included; `RegistryView::live_count()` / `live_slots()` count the live members. Selection draws over the live members and maps each drawn rank to that member's slot, so a registry without holes selects exactly as before.
 
 Signer keys come only from the immutable, version-addressed snapshot, so the caller supplies no per-signer data. A signing-key rotation publishes a new snapshot with the new key at the same index; an older snapshot keeps the key that signed under it. Node status is not part of the snapshot either: a node deactivated in a later version remains valid evidence for that historical snapshot.
 
@@ -56,9 +59,9 @@ Immutable, version-addressed snapshot view. `nodes` is borrowed, so on-chain cal
 | Field | Type | Notes |
 | --- | --- | --- |
 | `version` | `u32` | Must match `attestation.payload.registry_version` |
-| `node_count` | `u16` | Populated length of `nodes` |
+| `node_count` | `u16` | Slots in `nodes`, holes included (see `live_count()`) |
 | `redundancy_buffer` | `u8` | Passed through to selection / threshold checks |
-| `nodes` | `&[NodeEntry]` | Ordered members; only `nodes[..node_count]` is used. Selection-only callers may pass `&[]` |
+| `nodes` | `&[NodeEntry]` | Ordered slots; only `nodes[..node_count]` is used, a vacant (all-zero) entry is a hole. Selection-only callers may pass `&[]`, which reads as a registry without holes |
 
 ### `NodeEntry`
 

@@ -13,7 +13,7 @@ use crate::scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,
     secp256k1_scalar_is_valid_nonzero,
 };
-use crate::selection::verify_selection;
+use crate::selection::check_quorum;
 use crate::state::{RegistryView, SignerXy};
 
 /// Verify an attestation against the registry snapshot it names.
@@ -22,8 +22,11 @@ use crate::state::{RegistryView, SignerXy};
 /// `registry` is the snapshot for `attestation.payload.registry_version`, with its member table.
 /// Each set bit of `signers_bitmap` binds to `registry.nodes[bit]`, whose key is used as is.
 ///
-/// Re-derives the selection bitmap and enforces `signers ⊆ selection`. Checks run cheapest-first
-/// (version → scalar → selection → coalition → hash → recovery).
+/// Enforces the quorum (`popcount(signers) >= signatures_required`, non-empty) and that every set
+/// bit names a live slot of the snapshot. It does **not** check the committee selection: any
+/// `signatures_required` registered members may sign. Selection is for load balancing, and the
+/// program polices it through slashing and activity tracking. Checks run cheapest-first
+/// (version → scalar → quorum → coalition → hash → recovery).
 ///
 /// `coalition_key` is untrusted and not part of the signed message. When supplied it replaces
 /// the field inversion with a projective check against the verifier's own sum (see
@@ -45,15 +48,10 @@ pub fn verify(
         return Err(AttestationError::InvalidAggregateSignature);
     }
 
-    if !verify_selection(
-        &attestation.payload.source_id,
-        attestation.payload.timestamp,
+    check_quorum(
+        &Bitmap::load(&signature.signers_bitmap),
         attestation.payload.signatures_required,
-        registry,
-        &signature.signers_bitmap,
-    )? {
-        return Err(AttestationError::SignersNotSubsetOfSelection);
-    }
+    )?;
 
     let coalition = accumulate_registry_signers(registry, &signature.signers_bitmap)?;
     let x_coalition = compress_coalition(&coalition, coalition_key)?;
@@ -231,7 +229,7 @@ mod tests {
         let mut nodes = vec![NodeEntry::default(); MAX_REGISTRY_NODES];
         for (i, (x, y)) in PUBKEYS.iter().enumerate() {
             nodes[i] = NodeEntry {
-                account: [i as u8; 32],
+                account: [i as u8 + 1; 32],
                 x: *x,
                 y: *y,
             };
@@ -310,6 +308,72 @@ mod tests {
         let nodes = fixture_nodes();
         verify(&fixture_attestation(), &fixture_registry(&nodes), None)
             .expect("fixture attestation must verify");
+    }
+
+    #[test]
+    fn verify_does_not_check_the_committee_selection() {
+        let nodes = fixture_nodes();
+        let attestation = fixture_attestation();
+        let registry = fixture_registry(&nodes);
+        let selection = crate::selection::derive_selection_bitmap(
+            &SOURCE_ID,
+            TIMESTAMP,
+            SIGNATURES_REQUIRED,
+            &registry,
+        )
+        .unwrap();
+        // The fixture's signers are the derived committee of seven ...
+        assert_eq!(selection.to_bytes(), SIGNERS_BITMAP);
+
+        // ... and narrowing the committee to five would have made the signer set a strict
+        // superset, which the old subset check rejected. Verification does not look at it.
+        for buffer in [0, 1, 8] {
+            let narrowed = RegistryView {
+                redundancy_buffer: buffer,
+                ..registry
+            };
+            verify(&attestation, &narrowed, None)
+                .unwrap_or_else(|e| panic!("buffer {buffer}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn verify_enforces_the_quorum_without_selection() {
+        let nodes = fixture_nodes();
+        let registry = fixture_registry(&nodes);
+        let mut attestation = fixture_attestation();
+        attestation.payload.signatures_required = SIGNER_COUNT as u8 + 1;
+        assert_eq!(
+            verify(&attestation, &registry, None),
+            Err(AttestationError::InsufficientSigners)
+        );
+        attestation.signature.signers_bitmap = [0; 32];
+        assert_eq!(
+            verify(&attestation, &registry, None),
+            Err(AttestationError::InvalidSignersBitmap)
+        );
+    }
+
+    #[test]
+    fn a_hole_outside_the_signers_does_not_disturb_verification() {
+        let mut nodes = fixture_nodes();
+        let hole = (0..REGISTERED_NODE_COUNT as usize)
+            .find(|i| !Bitmap::load(&SIGNERS_BITMAP).bit_set(*i))
+            .unwrap();
+        nodes[hole] = NodeEntry::default();
+        verify(&fixture_attestation(), &fixture_registry(&nodes), None)
+            .expect("slots keep their bits when another member is removed");
+    }
+
+    #[test]
+    fn a_signer_bit_on_a_hole_is_refused() {
+        let mut nodes = fixture_nodes();
+        let signer = Bitmap::load(&SIGNERS_BITMAP).trailing_zeros();
+        nodes[signer] = NodeEntry::default();
+        assert_eq!(
+            verify(&fixture_attestation(), &fixture_registry(&nodes), None),
+            Err(AttestationError::InvalidSignersBitmap)
+        );
     }
 
     #[test]

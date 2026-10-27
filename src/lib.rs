@@ -70,5 +70,6 @@ pub use scalar::{
     secp256k1_scalar_is_valid_nonzero,
 };
 pub use selection::{
-    derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX, SELECTION_WINDOW_MS,
+    check_quorum, derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX,
+    SELECTION_WINDOW_MS,
 };

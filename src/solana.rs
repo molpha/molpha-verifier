@@ -86,7 +86,7 @@ pub const REGISTRY_NODES_OFFSET: usize = REGISTRY_BUMP_OFFSET + 1;
 const _: () = assert!(REGISTRY_NODES_OFFSET == REGISTRY_HEADER_LEN);
 
 pub const PROGRAM_ID: Pubkey =
-    Pubkey::from_str_const("chivcFQgxzwkpLvW41PV431HQ4dYpaW3povQH3AdpQt");
+    Pubkey::from_str_const("dzemhcTeUnUEhDcyUssWP8GfcMCYwKezVg4U1hvdEJe");
 
 /// Base for [`AccountError::code`] (`0x4D4F_0000` = ASCII `"MO"`).
 pub const ERROR_CODE_BASE: u32 = 0x4D4F_0000;
@@ -264,9 +264,9 @@ impl<'a> RegistryAccount<'a> {
             .expect("member table is a whole number of records, checked in load")
     }
 
-    /// Account address of member `index`.
+    /// Account address of the live member in slot `index`; a hole is an invalid index.
     pub fn node_key(&self, index: usize) -> Result<Pubkey, AccountError> {
-        if index >= usize::from(self.node_count()) {
+        if index >= usize::from(self.node_count()) || self.nodes()[index].is_vacant() {
             return Err(AttestationError::InvalidNodeIndex.into());
         }
         Ok(Pubkey::new_from_array(self.nodes()[index].account))

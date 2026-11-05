@@ -13,8 +13,8 @@ Given an [`Attestation`](src/payload.rs) (payload plus [`SchnorrSignature`](src/
 
 1. Requires `attestation.payload.registry_version == registry.version`
 2. Rejects an invalid / zero aggregate scalar `s`
-3. Enforces `popcount(signers_bitmap) ≥ signatures_required`, and that every set bit is a live slot of the snapshot (in range, not a hole)
-4. Reconstructs the coalition key `Σ X_i` from the snapshot's member keys (`registry.nodes[bit]` for each set bit), normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
+3. Enforces `popcount(signers_bitmap) ≥ signatures_required` (a provider bit counts like a node, `signatures_required == 0` never verifies, and more than one provider bit in `[64, 256)` is `InvalidSignersBitmap`), and that every set bit, node or provider, is a live slot of the snapshot (in range, not a hole)
+4. Reconstructs the coalition key `Σ X_i` from the snapshot's member keys (`registry.nodes[bit]` for every set bit, providers included), normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
 5. Hashes the message (`MOLPHA_MESSAGE_V1` domain, 141-byte preimage) over `value`, `source_id`, registry version, threshold, timestamp (unix milliseconds) and the signers bitmap
 6. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
 
@@ -22,7 +22,9 @@ Checks run cheapest-first, so a malformed attestation is rejected before it cost
 
 **Selection is not part of verification.** Any `signatures_required` registered members may sign; the verifier no longer requires `signers ⊆ selection`. The committee (`derive_selection_bitmap`, `MOLPHA_SELECTION_V1`) is a load-balancing device: gateways and nodes use it to decide who runs a round, and a program uses it to police that (slashing unsolicited signers) and to track activity (who was selected, who signed). [`derive_selection_bitmap`](src/selection.rs) and [`verify_selection`](src/selection.rs) remain for those callers.
 
-**Slots are stable.** Removing a node leaves a hole (an all-zero `NodeEntry`) instead of moving the last member into its slot, so a member keeps its signer bit for as long as it is in a snapshot. `RegistryView::node_count` is the number of slots, holes included; `RegistryView::live_count()` / `live_slots()` count the live members. Selection draws over the live members and maps each drawn rank to that member's slot, so a registry without holes selects exactly as before.
+**Slots are stable.** Removing a node leaves a hole (an all-zero `NodeEntry`) instead of moving the last member into its slot, so a member keeps its signer bit for as long as it is in a snapshot. `RegistryView::node_count` is the number of records, holes included; `RegistryView::live_count()` / `live_slots()` count the live **node** members. Selection draws over the live nodes and maps each drawn rank to that node's slot, so a registry without holes selects exactly as before.
+
+**Nodes and provider signers share the 256 bits.** Bits `[0, 64)` (`NODE_SLOTS`) are operator nodes. Bits `[64, 256)` are provider signers: provider slot `p` is bit and record `64 + p`. A provider's key joins the aggregate, so a set provider bit proves the provider signed that exact attestation. It counts toward `signatures_required` (at most one provider bit per attestation, so a provider round is `signatures_required - 1` nodes plus the provider), but selection never sees provider records: [`node_quorum`](src/selection.rs) is the committee size of an attestation, and `attestation_selection` / `verify_selection` draw by it. `verify` cannot tell which provider a source names, so any registered provider's bit counts on any source; a consumer that cares pins the provider with `verify_provenance`. [`verify_provenance`](src/verify.rs) (and `solana::verify_provenance`, which derives the provider PDA `["molpha_provider", u32le id]`) runs `verify` and then requires a set provider bit whose record account is the named provider, else `AttestationError::ProviderAbsent`. There is no function that reads a provider bit off an unverified signature.
 
 Signer keys come only from the immutable, version-addressed snapshot, so the caller supplies no per-signer data. A signing-key rotation publishes a new snapshot with the new key at the same index; an older snapshot keeps the key that signed under it. Node status is not part of the snapshot either: a node deactivated in a later version remains valid evidence for that historical snapshot.
 
@@ -59,7 +61,7 @@ Immutable, version-addressed snapshot view. `nodes` is borrowed, so on-chain cal
 | Field | Type | Notes |
 | --- | --- | --- |
 | `version` | `u32` | Must match `attestation.payload.registry_version` |
-| `node_count` | `u16` | Slots in `nodes`, holes included (see `live_count()`) |
+| `node_count` | `u16` | Records in `nodes`, holes included, provider records among them (see `live_count()`, which counts nodes) |
 | `redundancy_buffer` | `u8` | Passed through to selection / threshold checks |
 | `nodes` | `&[NodeEntry]` | Ordered slots; only `nodes[..node_count]` is used, a vacant (all-zero) entry is a hole. Selection-only callers may pass `&[]`, which reads as a registry without holes |
 

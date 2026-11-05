@@ -14,6 +14,9 @@
 //!    [`REGISTRY_MEMBER_LEN`]-byte member records, at most [`MAX_REGISTRY_NODES`] of them, and
 //!    `node_count` within that capacity
 //!
+//! [`verify_provenance`] is [`verify_attestation`] plus the requirement that a named provider
+//! signed: its registry record's `account` is the provider PDA ([`provider_account`]).
+//!
 //! [`verify_attestation`] also checks that the version was **not retired** by the round's
 //! timestamp, in seconds ([`RegistryAccount::retired_by`]). A superseded version keeps verifying
 //! rounds for its grace window only, so once a node rotates its key, the old key stops verifying
@@ -51,6 +54,9 @@ use crate::{
 /// Registry PDA seeds: `[REGISTRY_SEED_PREFIX, version.to_le_bytes(), [bump]]`.
 pub const REGISTRY_SEED_PREFIX: &[u8] = b"molpha_registry";
 
+/// Provider PDA seeds: `[PROVIDER_SEED_PREFIX, id.to_le_bytes(), [bump]]`.
+pub const PROVIDER_SEED_PREFIX: &[u8] = b"molpha_provider";
+
 /// Anchor discriminator for `Registry` (`sha256("account:Registry")[..8]`).
 pub const REGISTRY_DISCRIMINATOR: [u8; 8] = [47, 174, 110, 246, 184, 182, 252, 218];
 
@@ -87,6 +93,17 @@ const _: () = assert!(REGISTRY_NODES_OFFSET == REGISTRY_HEADER_LEN);
 
 pub const PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("dzemhcTeUnUEhDcyUssWP8GfcMCYwKezVg4U1hvdEJe");
+
+/// The `Provider` PDA of the provider with stable ID `id`: `["molpha_provider", u32le id]` under
+/// [`PROGRAM_ID`]. It is the `account` of that provider's registry record (table index
+/// `64 + slot`), and so what a provenance requirement binds to.
+pub fn provider_account(id: u32) -> Pubkey {
+    Pubkey::find_program_address(
+        &[PROVIDER_SEED_PREFIX, id.to_le_bytes().as_ref()],
+        &PROGRAM_ID,
+    )
+    .0
+}
 
 /// Base for [`AccountError::code`] (`0x4D4F_0000` = ASCII `"MO"`).
 pub const ERROR_CODE_BASE: u32 = 0x4D4F_0000;
@@ -309,6 +326,37 @@ pub fn verify_attestation(
     registry_account: &AccountInfo<'_>,
     coalition_key: Option<&CoalitionKey>,
 ) -> Result<(), AccountError> {
+    let registry = load_live_registry(attestation, registry_account)?;
+    Ok(verify(attestation, &registry.view(), coalition_key)?)
+}
+
+/// [`verify_attestation`], then require that provider `provider_id` signed.
+///
+/// The requirement is met when a set provider bit (`>= 64`) resolves, in the registry version the
+/// attestation names, to the record whose account is [`provider_account`]`(provider_id)`; otherwise
+/// the error is `Attestation(ProviderAbsent)`. A committee-only attestation, or one co-signed by
+/// another provider, therefore fails. The provider PDA is derived here, so the caller passes only
+/// the ID its source names.
+pub fn verify_provenance(
+    attestation: &Attestation,
+    registry_account: &AccountInfo<'_>,
+    coalition_key: Option<&CoalitionKey>,
+    provider_id: u32,
+) -> Result<(), AccountError> {
+    let registry = load_live_registry(attestation, registry_account)?;
+    Ok(crate::verify::verify_provenance(
+        attestation,
+        &registry.view(),
+        coalition_key,
+        &provider_account(provider_id).to_bytes(),
+    )?)
+}
+
+/// The registry account an attestation names, loaded and checked not to be retired by the round.
+fn load_live_registry<'a>(
+    attestation: &Attestation,
+    registry_account: &'a AccountInfo<'_>,
+) -> Result<RegistryAccount<'a>, AccountError> {
     let registry = RegistryAccount::load(registry_account)?;
     if attestation.payload.registry_version != registry.version() {
         return Err(AttestationError::InvalidRegistryVersion.into());
@@ -317,7 +365,7 @@ pub fn verify_attestation(
     if registry.retired_by(round_secs) {
         return Err(AttestationError::RegistryRetired.into());
     }
-    Ok(verify(attestation, &registry.view(), coalition_key)?)
+    Ok(registry)
 }
 
 /// Verify an aggregate over an arbitrary message hash from the `Registry` account (dispute /

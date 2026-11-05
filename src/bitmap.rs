@@ -18,9 +18,26 @@ const DERIVE_GROUP_BITMAP_MAX_ROUNDS: u64 = 65_536;
 #[repr(transparent)]
 pub struct Bitmap(U256);
 
+// `Bitmap::NODE_MASK` spells the low 64 bits out; keep it in step with the frozen split.
+const _: () = assert!(crate::state::NODE_SLOTS == 64);
+
 impl Bitmap {
     pub const EMPTY: Self = Self(U256::ZERO);
     pub const FULL: Self = Self(U256::MAX);
+    /// Bits `[0, NODE_SLOTS)`: the operator-node segment of a signers bitmap.
+    pub const NODE_MASK: Self = Self(U256::new(u64::MAX as u128));
+
+    /// This bitmap restricted to the node segment, `self & NODE_MASK`. Provider bits drop out.
+    #[inline]
+    pub fn node_bits(&self) -> Self {
+        Self(self.0 & Self::NODE_MASK.0)
+    }
+
+    /// This bitmap restricted to the provider segment, `self & !NODE_MASK`: bits `[NODE_SLOTS, 256)`.
+    #[inline]
+    pub fn provider_bits(&self) -> Self {
+        Self(self.0 & !Self::NODE_MASK.0)
+    }
 
     #[inline]
     pub fn load(bytes: &[u8; 32]) -> Self {

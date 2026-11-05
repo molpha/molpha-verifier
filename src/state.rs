@@ -3,11 +3,28 @@
 //! Canonical account types live in the downstream program. Callers pass a [`RegistryView`] whose
 //! `nodes` carry each member's account address and secp256k1 key, so signers are resolved from
 //! the snapshot itself.
+//!
+//! # Records and bits
+//!
+//! The 256-bit signers bitmap splits in two, frozen by the protocol: bits `[0, NODE_SLOTS)` are
+//! operator nodes (record `i` at bit `i`), bits `[NODE_SLOTS, 256)` are provider signers (provider
+//! slot `p` at bit `NODE_SLOTS + p`, record `NODE_SLOTS + p`). Both segments live in one record
+//! table, and a set bit of either segment must name a live record. Every set bit counts toward the
+//! quorum (at most one of them a provider bit); only node bits take part in committee selection.
 
 use crate::error::AttestationError;
 
-/// Maximum registry membership (signer bitmaps are 256-bit).
+/// Maximum registry records (signer bitmaps are 256-bit): node slots and provider slots together.
 pub const MAX_REGISTRY_NODES: usize = 256;
+
+/// Record and bit indexes `[0, NODE_SLOTS)` belong to operator nodes.
+pub const NODE_SLOTS: usize = 64;
+
+/// Record and bit index of provider slot 0; provider slot `p` sits at `PROVIDER_BIT_BASE + p`.
+pub const PROVIDER_BIT_BASE: usize = NODE_SLOTS;
+
+/// Provider slots (`p` in `0..MAX_PROVIDER_SLOTS`, at bits `64..256`).
+pub const MAX_PROVIDER_SLOTS: usize = MAX_REGISTRY_NODES - NODE_SLOTS;
 
 /// Secp256k1 affine coordinates `(x, y)`, big-endian.
 pub type SignerXy = ([u8; 32], [u8; 32]);
@@ -16,9 +33,10 @@ pub type SignerXy = ([u8; 32], [u8; 32]);
 ///
 /// A member keeps its slot (its signer bit) for as long as it is in the snapshot: removing a
 /// node leaves a vacant slot instead of moving the last member into it. `node_count` is therefore
-/// the number of slots, **holes included**, and the count of live members is
-/// [`RegistryView::live_count`]. A hole is an all-zero [`NodeEntry`]; trailing holes are never
-/// stored, so the last slot is always live.
+/// the number of records, **holes included**, across the node and provider segments: the highest
+/// live record index + 1. The count of live **node** members is [`RegistryView::live_count`]. A
+/// hole is an all-zero [`NodeEntry`]; trailing holes are never stored, so the last record is
+/// always live.
 ///
 /// `nodes` is borrowed so on-chain callers can view the account's member table without copying
 /// (see [`NodeEntry::slice_from_bytes`]). Selection-only callers may pass `&[]`, which reads as a
@@ -27,7 +45,7 @@ pub type SignerXy = ([u8; 32], [u8; 32]);
 #[derive(Clone, Copy, Debug)]
 pub struct RegistryView<'a> {
     pub version: u32,
-    /// Slots in the member table, holes included.
+    /// Records in the member table, holes included, provider records among them.
     pub node_count: u16,
     pub redundancy_buffer: u8,
     /// Ordered slots; only `nodes[..node_count]` is populated.
@@ -35,9 +53,10 @@ pub struct RegistryView<'a> {
 }
 
 impl RegistryView<'_> {
-    /// The member bound to signer bit `bit`.
+    /// The member bound to signer bit `bit`, a node (`bit < NODE_SLOTS`) or a provider signer.
     ///
-    /// Errors unless `bit < node_count`, the member table covers it and the slot is live.
+    /// Errors unless `bit < node_count`, the member table covers it and the slot is live. A hole
+    /// is refused in both segments.
     #[inline(always)]
     pub fn signer(&self, bit: usize) -> Result<&NodeEntry, AttestationError> {
         if bit >= usize::from(self.node_count) {
@@ -49,14 +68,15 @@ impl RegistryView<'_> {
         }
     }
 
-    /// The live slots in ascending order.
+    /// The live **node** slots (`< NODE_SLOTS`) in ascending order. Provider records are not
+    /// nodes: they are never selected and never counted toward the committee.
     ///
-    /// Without a member table (`nodes` shorter than `node_count`, for example the empty slice of
-    /// a selection-only caller) every slot is taken to be live.
+    /// Without a member table (`nodes` shorter than the slots examined, for example the empty
+    /// slice of a selection-only caller) every node slot below `node_count` is taken to be live.
     pub fn live_slots(&self) -> LiveSlots {
-        let slots = usize::from(self.node_count).min(MAX_REGISTRY_NODES);
+        let slots = usize::from(self.node_count).min(NODE_SLOTS);
         let mut out = LiveSlots {
-            slots: [0; MAX_REGISTRY_NODES],
+            slots: [0; NODE_SLOTS],
             len: 0,
         };
         let table = self.nodes.get(..slots);
@@ -69,16 +89,17 @@ impl RegistryView<'_> {
         out
     }
 
-    /// Number of live members (`node_count` minus the holes).
+    /// Number of live node members (node slots minus the holes). Provider records are not counted.
     pub fn live_count(&self) -> u32 {
         self.live_slots().len() as u32
     }
 }
 
-/// The live slots of a snapshot in ascending order, as returned by [`RegistryView::live_slots`].
+/// The live node slots of a snapshot in ascending order, as returned by
+/// [`RegistryView::live_slots`].
 #[derive(Clone, Copy, Debug)]
 pub struct LiveSlots {
-    slots: [u16; MAX_REGISTRY_NODES],
+    slots: [u16; NODE_SLOTS],
     len: usize,
 }
 
@@ -231,6 +252,73 @@ mod tests {
         assert_eq!(view.live_slots().as_slice(), &[0, 2, 3]);
         assert_eq!(view.live_slots().slot(1), Some(2));
         assert_eq!(view.live_slots().slot(3), None);
+    }
+
+    /// `nodes` padded with holes up to the provider segment, then one live record per listed
+    /// provider slot at index `PROVIDER_BIT_BASE + slot`.
+    fn with_providers(mut nodes: Vec<NodeEntry>, provider_slots: &[usize]) -> Vec<NodeEntry> {
+        nodes.resize(NODE_SLOTS, NodeEntry::default());
+        for slot in provider_slots {
+            nodes.resize(PROVIDER_BIT_BASE + slot + 1, NodeEntry::default());
+            nodes[PROVIDER_BIT_BASE + slot] = live(200 + *slot as u8);
+        }
+        nodes
+    }
+
+    #[test]
+    fn provider_records_are_not_live_nodes() {
+        let nodes = with_providers(vec![live(1), NodeEntry::default(), live(3)], &[1, 2]);
+        let view = RegistryView {
+            version: 0,
+            node_count: nodes.len() as u16,
+            redundancy_buffer: 0,
+            nodes: &nodes,
+        };
+        assert_eq!(view.node_count, 67);
+        assert_eq!(view.live_count(), 2);
+        assert_eq!(view.live_slots().as_slice(), &[0, 2]);
+        assert_eq!(view.live_slots().slot(2), None);
+    }
+
+    #[test]
+    fn a_hole_is_refused_in_the_provider_segment_too() {
+        let nodes = with_providers(vec![live(1)], &[2]);
+        let view = RegistryView {
+            version: 0,
+            node_count: nodes.len() as u16,
+            redundancy_buffer: 0,
+            nodes: &nodes,
+        };
+        // Slot 0 (reserved) and slot 1 are holes inside the table, slot 3 is past its end.
+        for bit in [
+            PROVIDER_BIT_BASE,
+            PROVIDER_BIT_BASE + 1,
+            PROVIDER_BIT_BASE + 3,
+        ] {
+            assert_eq!(
+                view.signer(bit),
+                Err(AttestationError::InvalidSignersBitmap)
+            );
+        }
+        assert_eq!(
+            view.signer(PROVIDER_BIT_BASE + 2).unwrap().account,
+            [202; 32]
+        );
+        // A node hole is refused as before.
+        assert_eq!(view.signer(5), Err(AttestationError::InvalidSignersBitmap));
+    }
+
+    #[test]
+    fn without_a_member_table_node_slots_stop_at_the_provider_segment() {
+        let view = RegistryView {
+            version: 0,
+            node_count: 100,
+            redundancy_buffer: 0,
+            nodes: &[],
+        };
+        assert_eq!(view.live_count(), NODE_SLOTS as u32);
+        assert_eq!(view.live_slots().slot(NODE_SLOTS - 1), Some(NODE_SLOTS - 1));
+        assert_eq!(view.live_slots().slot(NODE_SLOTS), None);
     }
 
     #[test]

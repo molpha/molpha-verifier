@@ -39,6 +39,11 @@ fn derive_group_bitmap_sweep_digest_is_stable() {
     );
 }
 
+/// Node counts above 64 draw over the 64 node slots: records from index 64 up are provider
+/// records, which selection never sees (bits `[0, 64)` are nodes, `[64, 256)` providers). Entries
+/// of this sweep with `node_count <= 64` are the plain sampler output, as before the split, and
+/// the digest below moved only because the larger counts now cap at 64. A consensus change of
+/// the provider-signer split: every implementation (node, gateway, SDK) changes with it.
 #[test]
 fn derive_selection_bitmap_sweep_digest_is_stable() {
     let mut hasher = Sha256::new();
@@ -74,7 +79,7 @@ fn derive_selection_bitmap_sweep_digest_is_stable() {
     let digest: [u8; 32] = hasher.finalize().into();
     assert_eq!(
         hex(&digest),
-        "f2ae2cd7b44aec35586ca639c9d17c616befd511fa54b54567f3a25afef6fb90",
+        "1880a549acd143cc508c1eb97b0ad509b312404b23064088216847dad82af5bb",
         "derive_selection_bitmap output changed — this is a consensus break, not a test to update",
     );
 }
@@ -89,8 +94,13 @@ const HOLE_VECTORS: &str = include_str!("fixtures/selection_holes.vectors");
 type HoleCase = (String, [u8; 32], [u8; 32], u32, u64, u8, u8);
 
 /// One line per case: `live source version timestamp_ms required buffer selection`, whitespace
-/// separated. `live` and `selection` are 32-byte big-endian bitmaps (bit `i` = slot `i`), `source`
+/// separated. `live` and `selection` are 32-byte big-endian bitmaps (bit `i` = record `i`), `source`
 /// is 32 bytes, all hex. The node, gateway and SDK read the same file.
+///
+/// Bits `[0, 64)` of `live` are node slots and bits `[64, 256)` are provider records: the table is
+/// built with a live record for every set bit, and `selection` draws over the live node slots only,
+/// so it never has a bit `>= 64` and a case with provider records selects exactly what the same
+/// case without them selects. Lines of 64 slots or fewer predate the split and are unchanged.
 fn hole_cases() -> Vec<HoleCase> {
     let mut cases = Vec::new();
     for i in 0..48u32 {

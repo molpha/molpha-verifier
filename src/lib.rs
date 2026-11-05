@@ -3,9 +3,14 @@
 //!
 //! Framework-agnostic: the caller owns registry account types and passes plain data.
 //! Verify via [`verify()`] with a [`RegistryView`] of the registry snapshot the attestation
-//! names. Each member of the snapshot ([`NodeEntry`]) carries the node's account address and
+//! names. Each member of the snapshot ([`NodeEntry`]) carries the member's account address and
 //! secp256k1 key, and each set bit of the signers bitmap binds to `registry.nodes[bit]`, so
 //! signers are resolved from the snapshot itself.
+//!
+//! The 256 bits split in two: bits `[0, 64)` are operator nodes; bits `[64, 256)` are provider
+//! signers, whose keys join the aggregate. Every set bit counts toward `signatures_required`, but
+//! at most one provider bit may be set, so a provider round is `signatures_required - 1` nodes
+//! plus the provider. [`verify_provenance()`] additionally requires a named provider.
 //!
 //! With the `solana` feature, [`solana`] accepts `&AccountInfo` and performs owner /
 //! discriminator / shape checks before verifying.
@@ -52,14 +57,15 @@ pub use payload::Attestation;
 pub use payload::AttestationPayload;
 pub use payload::SchnorrSignature;
 pub use pop::{
-    key_rotation_digest, validate_key_and_verify_pop, verify_key_rotation, KeyRotationError,
-    KeyRotationProof, NodePopError, NODE_KEY_ROTATION_PREFIX, NODE_POP_PREFIX,
+    key_rotation_digest, validate_key_and_verify_pop, validate_provider_key_and_verify_pop,
+    verify_key_rotation, KeyRotationError, KeyRotationProof, NodePopError,
+    NODE_KEY_ROTATION_PREFIX, NODE_POP_PREFIX, PROVIDER_POP_PREFIX,
 };
 pub use state::*;
 
 pub use verify::{
     coalition_key, reconstruct_coalition_key, verify, verify_aggregate_over_hash,
-    verify_aggregate_over_hash_with_coalition_key,
+    verify_aggregate_over_hash_with_coalition_key, verify_provenance,
 };
 
 pub use bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};
@@ -70,6 +76,6 @@ pub use scalar::{
     secp256k1_scalar_is_valid_nonzero,
 };
 pub use selection::{
-    check_quorum, derive_selection_bitmap, verify_selection, SELECTION_SEED_PREFIX,
-    SELECTION_WINDOW_MS,
+    attestation_selection, check_quorum, derive_selection_bitmap, node_quorum, verify_selection,
+    SELECTION_SEED_PREFIX, SELECTION_WINDOW_MS,
 };

@@ -22,11 +22,13 @@ use crate::state::{RegistryView, SignerXy};
 /// `registry` is the snapshot for `attestation.payload.registry_version`, with its member table.
 /// Each set bit of `signers_bitmap` binds to `registry.nodes[bit]`, whose key is used as is.
 ///
-/// Enforces the quorum (`popcount(signers) >= signatures_required`, non-empty) and that every set
-/// bit names a live slot of the snapshot. It does **not** check the committee selection: any
-/// `signatures_required` registered members may sign. Selection is for load balancing, and the
-/// program polices it through slashing and activity tracking. Checks run cheapest-first
-/// (version → scalar → quorum → coalition → hash → recovery).
+/// Enforces the quorum (`popcount(signers) >= signatures_required`, non-empty, at most one provider
+/// bit: the provider counts like a node) and that every set bit, node or provider, names a live
+/// slot of the snapshot. The aggregate key is the sum of the keys of **all** set bits. It does
+/// **not** check the committee selection: any `signatures_required` registered signers may sign,
+/// and it cannot tell which provider a source names (use [`verify_provenance`]). Selection is for load
+/// balancing, and the program polices it through slashing and activity tracking. Checks run
+/// cheapest-first (version → scalar → quorum → coalition → hash → recovery).
 ///
 /// `coalition_key` is untrusted and not part of the signed message. When supplied it replaces
 /// the field inversion with a projective check against the verifier's own sum (see
@@ -66,6 +68,43 @@ pub fn verify(
         Ok(())
     } else {
         Err(AttestationError::InvalidAggregateSignature)
+    }
+}
+
+/// [`verify`], then require that the signature carries the provider named by `provider_account`.
+///
+/// `provider_account` is the registry record `account` of the required provider: on Solana the
+/// provider PDA `["molpha_provider", u32le id]` (see `solana::provider_account`, or
+/// `solana::verify_provenance` which derives it from the id). The provider requirement is met when
+/// a set provider bit (`>= NODE_SLOTS`) resolves, in the snapshot the attestation names, to a live
+/// record with exactly that account. Otherwise the result is [`AttestationError::ProviderAbsent`].
+///
+/// The check runs only after the signature has verified, so the provider bit it finds was covered
+/// by the aggregate: the record's key is in the signed sum. There is deliberately no function that
+/// reads a provider bit off an unverified signature.
+pub fn verify_provenance(
+    attestation: &Attestation,
+    registry: &RegistryView,
+    coalition_key: Option<&CoalitionKey>,
+    provider_account: &[u8; 32],
+) -> Result<(), AttestationError> {
+    verify(attestation, registry, coalition_key)?;
+
+    let providers =
+        Bitmap::load(&attestation.signature.signers_bitmap).subtract(&Bitmap::NODE_MASK);
+    let mut present = false;
+    for_each_set_bit(providers, |bit| {
+        // A set bit was resolved to a live record by `verify`; a hole could never match anyway,
+        // since the zero account is not a provider.
+        if registry.signer(bit)?.account == *provider_account {
+            present = true;
+        }
+        Ok::<(), AttestationError>(())
+    })?;
+    if present {
+        Ok(())
+    } else {
+        Err(AttestationError::ProviderAbsent)
     }
 }
 

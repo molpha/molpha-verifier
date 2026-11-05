@@ -18,7 +18,7 @@ pub enum AttestationError {
         error("malformed signature component (e.g. non-canonical Schnorr scalar)")
     )]
     InvalidSignature,
-    /// `popcount(signers_bitmap) < signatures_required`.
+    /// `popcount(signers_bitmap) < signatures_required`, or `signatures_required == 0`.
     #[cfg_attr(
         feature = "thiserror",
         error("insufficient signers: popcount(signers_bitmap) < signatures_required")
@@ -30,10 +30,11 @@ pub enum AttestationError {
         error("signers_bitmap is not a subset of the derived selection bitmap")
     )]
     SignersNotSubsetOfSelection,
-    /// Empty bitmap, bits set outside `[0, node_count)` or the registry's member table.
+    /// Empty bitmap, more than one provider bit, bits set outside `[0, node_count)` or the
+    /// registry's member table, or a set bit (node or provider) on a hole.
     #[cfg_attr(
         feature = "thiserror",
-        error("invalid signers_bitmap (empty, or bits outside the registry)")
+        error("invalid signers_bitmap (empty, more than one provider bit, or bits outside the registry)")
     )]
     InvalidSignersBitmap,
     /// Selection derivation failed (bad parameters or sampling did not converge).
@@ -64,6 +65,12 @@ pub enum AttestationError {
         error("registry version was retired before the round's timestamp")
     )]
     RegistryRetired,
+    /// The attestation verifies, but no set provider bit names the required provider.
+    #[cfg_attr(
+        feature = "thiserror",
+        error("no set provider bit names the required provider")
+    )]
+    ProviderAbsent,
 }
 
 #[cfg(all(test, feature = "thiserror"))]

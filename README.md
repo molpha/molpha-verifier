@@ -13,13 +13,18 @@ Given an [`Attestation`](src/payload.rs) (payload plus [`SchnorrSignature`](src/
 
 1. Requires `attestation.payload.registry_version == registry.version`
 2. Rejects an invalid / zero aggregate scalar `s`
-3. Enforces `popcount(signers_bitmap) ≥ signatures_required`
-4. Re-derives the deterministic selection bitmap and requires `signers ⊆ selection`
-5. Reconstructs the coalition key `Σ X_i` from the snapshot's member keys (`registry.nodes[bit]` for each set bit), normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
-6. Hashes the message (`MOLPHA_MESSAGE_V1` domain, 141-byte preimage) over `value`, `source_id`, registry version, threshold, timestamp (unix milliseconds) and the signers bitmap
-7. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
+3. Enforces `popcount(signers_bitmap) ≥ signatures_required` (a provider bit counts like a node, `signatures_required == 0` never verifies, and more than one provider bit in `[64, 256)` is `InvalidSignersBitmap`), and that every set bit, node or provider, is a live slot of the snapshot (in range, not a hole)
+4. Reconstructs the coalition key `Σ X_i` from the snapshot's member keys (`registry.nodes[bit]` for every set bit, providers included), normalizing it with a field inversion or [checking a supplied affine key](#supplying-the-coalition-key)
+5. Hashes the message (`MOLPHA_MESSAGE_V1` domain, 141-byte preimage) over `value`, `source_id`, registry version, threshold, timestamp (unix milliseconds) and the signers bitmap
+6. Recovers the commitment address via the Schnorr→ECDSA trick and matches `commitment`
 
-Checks run cheapest-first, so a malformed attestation is rejected before it costs a selection derivation or a curve operation.
+Checks run cheapest-first, so a malformed attestation is rejected before it costs a curve operation.
+
+**Selection is not part of verification.** Any `signatures_required` registered members may sign; the verifier no longer requires `signers ⊆ selection`. The committee (`derive_selection_bitmap`, `MOLPHA_SELECTION_V1`) is a load-balancing device: gateways and nodes use it to decide who runs a round, and a program uses it to police that (slashing unsolicited signers) and to track activity (who was selected, who signed). [`derive_selection_bitmap`](src/selection.rs) and [`verify_selection`](src/selection.rs) remain for those callers.
+
+**Slots are stable.** Removing a node leaves a hole (an all-zero `NodeEntry`) instead of moving the last member into its slot, so a member keeps its signer bit for as long as it is in a snapshot. `RegistryView::node_count` is the number of node slots and `provider_count` the number of provider slots, each holes included; `RegistryView::live_count()` / `live_slots()` count the live **node** members. Selection draws over the live nodes and maps each drawn rank to that node's slot, so a registry without holes selects exactly as before.
+
+**Nodes and provider signers share the 256 bits.** Bits `[0, 64)` (`NODE_SLOTS`) are operator nodes. Bits `[64, 256)` are provider signers: provider slot `p` is bit `64 + p`, stored in a second table after the nodes (`providers[p]`), so a provider costs one record and no padding up to bit 64. A provider's key joins the aggregate, so a set provider bit proves the provider signed that exact attestation. It counts toward `signatures_required` (at most one provider bit per attestation, so a provider round is `signatures_required - 1` nodes plus the provider), but selection never sees provider records: [`node_quorum`](src/selection.rs) is the committee size of an attestation, and `attestation_selection` / `verify_selection` draw by it. `verify` cannot tell which provider a source names, so any registered provider's bit counts on any source; a consumer that cares pins the provider with `verify_provenance`. [`verify_provenance`](src/verify.rs) (and `solana::verify_provenance`, which derives the provider PDA `["molpha_provider", u32le id]`) runs `verify` and then requires a set provider bit whose record account is the named provider, else `AttestationError::ProviderAbsent`. There is no function that reads a provider bit off an unverified signature.
 
 Signer keys come only from the immutable, version-addressed snapshot, so the caller supplies no per-signer data. A signing-key rotation publishes a new snapshot with the new key at the same index; an older snapshot keeps the key that signed under it. Node status is not part of the snapshot either: a node deactivated in a later version remains valid evidence for that historical snapshot.
 
@@ -51,18 +56,20 @@ Aggregate signature material, passed separately from the payload:
 
 ### `RegistryView`
 
-Immutable, version-addressed snapshot view. `nodes` is borrowed, so on-chain callers can view the account's member table in place ([`NodeEntry::slice_from_bytes`](src/state.rs)):
+Immutable, version-addressed snapshot view. `nodes` and `providers` are borrowed, so on-chain callers can view the account's two tables in place ([`NodeEntry::slice_from_bytes`](src/state.rs)):
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `version` | `u32` | Must match `attestation.payload.registry_version` |
-| `node_count` | `u16` | Populated length of `nodes` |
+| `node_count` | `u16` | Node slots, holes included (at most 64 on chain; see `live_count()`, which counts live nodes) |
+| `provider_count` | `u16` | Provider slots, holes included (slot 0 is reserved) |
 | `redundancy_buffer` | `u8` | Passed through to selection / threshold checks |
-| `nodes` | `&[NodeEntry]` | Ordered members; only `nodes[..node_count]` is used. Selection-only callers may pass `&[]` |
+| `nodes` | `&[NodeEntry]` | Node slots in order; only `nodes[..node_count]` is used, a vacant (all-zero) entry is a hole. Selection-only callers may pass `&[]`, which reads as a registry without holes |
+| `providers` | `&[NodeEntry]` | Provider slots in order; only `providers[..provider_count]` is used. Bit `64 + p` is `providers[p]` |
 
 ### `NodeEntry`
 
-One registry member, `repr(C)` and laid out exactly like the program's 96-byte member record, so account data can be reinterpreted in place. Bit `i` of a signers bitmap is `nodes[i]`:
+One registry member, `repr(C)` and laid out exactly like the program's 96-byte member record, so account data can be reinterpreted in place. Bit `i < 64` of a signers bitmap is `nodes[i]`, bit `64 + p` is `providers[p]`:
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -94,12 +101,14 @@ molpha-verifier = "0.4"
 ```rust
 use molpha_verifier::{verify, Attestation, NodeEntry, RegistryView};
 
-// `members`: the snapshot's member table, one NodeEntry (account + key) per registry index.
+// `nodes` / `providers`: the snapshot's two tables, one NodeEntry (account + key) per slot.
 let registry = RegistryView {
     version: attestation.payload.registry_version,
     node_count,
+    provider_count,
     redundancy_buffer,
-    nodes: &members,
+    nodes: &nodes,
+    providers: &providers,
 };
 // The coalition key is optional; `None` normalizes with a field inversion.
 verify(&attestation, &registry, None)?;
@@ -174,13 +183,13 @@ The account is checked before any field is trusted:
 | --- | --- |
 | Owner is Molpha `PROGRAM_ID` | ✓ |
 | Anchor discriminator | `sha256("account:Registry")[..8]` |
-| Shape | `REGISTRY_HEADER_LEN` (32) bytes, then a whole number of 96-byte member records, at most `MAX_REGISTRY_NODES`; `node_count` within that capacity |
+| Shape | `REGISTRY_HEADER_LEN` (32) bytes, then a whole number of 96-byte member records, at most `MAX_REGISTRY_NODES`; `node_count` (u8 at 28) at most 64, `provider_count` (u8 at 29) at most 192, and both tables within that capacity |
 | Body decode | fixed offsets (`zero_copy`): header fields, then the member table |
 | Not retired (`verify_attestation` only) | the version's grace window had not ended by the round's timestamp in seconds: `grace_active_until` is `0` or `> ts` (`RegistryAccount::retired_by`) |
 
 A superseded version keeps verifying rounds for its grace window only, so after a node rotates its key the old key stops verifying new rounds when that window ends; `verify_attestation` fails with `AttestationError::RegistryRetired`. A round dated slightly before the version was created is not refused, because the round's stamp and the chain clock that dates versions can disagree by a few seconds (`RegistryAccount::is_active_at` applies the program's full rule if you want it). The dispute path does not check this: evidence signed under any version stays verifiable here, and how late it may be filed is the program's policy (Molpha's closes one settlement window after the version's grace ends). Freshness of the round itself (`maxAge`) remains the caller's policy.
 
-The member table is the tail of the account and its capacity comes from the account length (`registry_account_len(capacity)`), so a program that grows or shrinks the table needs no verifier release. The Molpha program sizes each snapshot to exactly its members, from 32 bytes for an empty registry to 24,608 for a full one; records past `node_count` are never read. Signer keys are validated as curve points when they are summed. Node **status is not part of the snapshot** — a node deactivated in a later version remains valid evidence for a historical snapshot.
+The two tables are the tail of the account (nodes, then providers) and its capacity comes from the account length (`registry_account_len(capacity)`), so a program that grows or shrinks the table needs no verifier release. The Molpha program sizes each snapshot to exactly its members, from 32 bytes for an empty registry to 24,608 for a full one; records past the two tables are never read. Signer keys are validated as curve points when they are summed. Node **status is not part of the snapshot** — a node deactivated in a later version remains valid evidence for a historical snapshot.
 
 Errors come back as [`solana::AccountError`](src/solana.rs), which wraps `AttestationError` so one `?` covers both account I/O and crypto. `From<AccountError> for ProgramError` maps to `ProgramError::Custom(ERROR_CODE_BASE + n)`, based at `0x4D4F_0000` — outside Anchor's reserved *and* `6000+` user ranges, so it never collides with a consumer's own codes.
 

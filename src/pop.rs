@@ -17,6 +17,10 @@ use crate::{
 /// Domain separator for node proofs of possession.
 pub const NODE_POP_PREFIX: &[u8] = b"MOLPHA_NODE_POP_V1";
 
+/// Domain separator for provider proofs of possession. The construction is the node's; only the
+/// message differs: `keccak256(PROVIDER_POP_PREFIX ‖ program_id ‖ authority)`.
+pub const PROVIDER_POP_PREFIX: &[u8] = b"MOLPHA_PROVIDER_POP_V1";
+
 /// Domain separator for node signing-key rotations.
 pub const NODE_KEY_ROTATION_PREFIX: &[u8] = b"MOLPHA_NODE_KEY_ROTATION_V1";
 
@@ -42,8 +46,29 @@ pub fn validate_key_and_verify_pop(
 ) -> Result<SignerXy, NodePopError> {
     let coordinates = normalize_public_key(public_key_compressed)?;
     verify_pop(
-        program_id,
-        node_id,
+        &derive_node_pop_message(program_id, node_id),
+        public_key_compressed,
+        &coordinates.0,
+        pop_sig_r,
+        pop_sig_s,
+    )?;
+    Ok(coordinates)
+}
+
+/// [`validate_key_and_verify_pop`] for a provider signing key.
+///
+/// `authority` is the provider authority that registers the key; the proof is bound to it and to
+/// the program, so it cannot be replayed by another authority.
+pub fn validate_provider_key_and_verify_pop(
+    program_id: &[u8; 32],
+    authority: &[u8; 32],
+    public_key_compressed: &[u8; 33],
+    pop_sig_r: &[u8; 32],
+    pop_sig_s: &[u8; 32],
+) -> Result<SignerXy, NodePopError> {
+    let coordinates = normalize_public_key(public_key_compressed)?;
+    verify_pop(
+        &derive_provider_pop_message(program_id, authority),
         public_key_compressed,
         &coordinates.0,
         pop_sig_r,
@@ -72,8 +97,7 @@ fn normalize_public_key(public_key_compressed: &[u8; 33]) -> Result<SignerXy, No
 }
 
 fn verify_pop(
-    program_id: &[u8; 32],
-    node_id: &[u8; 32],
+    pop_message: &[u8; 32],
     public_key_compressed: &[u8; 33],
     public_key_x: &[u8; 32],
     pop_sig_r: &[u8; 32],
@@ -92,7 +116,6 @@ fn verify_pop(
             .serialize();
 
     let parity_bit = [public_key_compressed[0] & 1];
-    let pop_message = derive_node_pop_message(program_id, node_id);
     let challenge = secp256k1_scalar_reduce_be(
         hashv(&[
             public_key_x.as_ref(),
@@ -127,6 +150,10 @@ fn verify_pop(
 
 fn derive_node_pop_message(program_id: &[u8; 32], node_id: &[u8; 32]) -> [u8; 32] {
     hashv(&[NODE_POP_PREFIX, program_id.as_ref(), node_id.as_ref()]).to_bytes()
+}
+
+fn derive_provider_pop_message(program_id: &[u8; 32], authority: &[u8; 32]) -> [u8; 32] {
+    hashv(&[PROVIDER_POP_PREFIX, program_id.as_ref(), authority.as_ref()]).to_bytes()
 }
 
 /// Both signatures that authorize replacing a node's signing key.
@@ -294,6 +321,20 @@ mod tests {
         signing_secret: &[u8; 32],
         nonce: &[u8; 32],
     ) -> ([u8; 32], [u8; 32]) {
+        sign_pop_message(
+            &derive_node_pop_message(program_id, node_id),
+            public_key_compressed,
+            signing_secret,
+            nonce,
+        )
+    }
+
+    fn sign_pop_message(
+        message: &[u8; 32],
+        public_key_compressed: &[u8; 33],
+        signing_secret: &[u8; 32],
+        nonce: &[u8; 32],
+    ) -> ([u8; 32], [u8; 32]) {
         let mut canonical_nonce = *nonce;
         let mut nonce_public_key = public_key_for_secret(&canonical_nonce);
         if nonce_public_key[0] == 0x03 {
@@ -303,7 +344,6 @@ mod tests {
         let r: [u8; 32] = nonce_public_key[1..33].try_into().unwrap();
         let public_key_x: [u8; 32] = public_key_compressed[1..33].try_into().unwrap();
         let parity = [public_key_compressed[0] & 1];
-        let message = derive_node_pop_message(program_id, node_id);
         let challenge = secp256k1_scalar_reduce_be(
             hashv(&[
                 public_key_x.as_ref(),
@@ -796,6 +836,89 @@ mod tests {
         assert_eq!(
             verify_key_rotation(&PROGRAM, &NODE, &key_xy(&scalar(9)), &proof),
             Ok(key_xy(&scalar(10)))
+        );
+    }
+
+    #[test]
+    fn provider_pop_prefix_matches_the_spec() {
+        assert_eq!(PROVIDER_POP_PREFIX, b"MOLPHA_PROVIDER_POP_V1");
+        assert_ne!(PROVIDER_POP_PREFIX, NODE_POP_PREFIX);
+    }
+
+    #[test]
+    fn a_provider_pop_binds_the_program_the_authority_and_the_key() {
+        let program_id = [1u8; 32];
+        let authority = [2u8; 32];
+        let secret = scalar(9);
+        let compressed = public_key_for_secret(&secret);
+        let message = derive_provider_pop_message(&program_id, &authority);
+        let (r, s) = sign_pop_message(&message, &compressed, &secret, &scalar(13));
+
+        let (x, _) =
+            validate_provider_key_and_verify_pop(&program_id, &authority, &compressed, &r, &s)
+                .unwrap();
+        assert_eq!(x, compressed[1..33]);
+
+        // Another authority, another program, or another key cannot reuse the proof.
+        assert_eq!(
+            validate_provider_key_and_verify_pop(&program_id, &[3u8; 32], &compressed, &r, &s),
+            Err(NodePopError::InvalidProof)
+        );
+        assert_eq!(
+            validate_provider_key_and_verify_pop(&[4u8; 32], &authority, &compressed, &r, &s),
+            Err(NodePopError::InvalidProof)
+        );
+        let other = public_key_for_secret(&scalar(10));
+        assert_eq!(
+            validate_provider_key_and_verify_pop(&program_id, &authority, &other, &r, &s),
+            Err(NodePopError::InvalidProof)
+        );
+        // A rogue key: a valid point whose secret the signer does not hold.
+        let (rogue_r, rogue_s) = sign_pop_message(&message, &other, &secret, &scalar(13));
+        assert_eq!(
+            validate_provider_key_and_verify_pop(
+                &program_id,
+                &authority,
+                &other,
+                &rogue_r,
+                &rogue_s
+            ),
+            Err(NodePopError::InvalidProof)
+        );
+    }
+
+    /// The two domains do not cross: a node's proof registers no provider key, and the other way.
+    #[test]
+    fn node_and_provider_pops_are_separate_domains() {
+        let program_id = [1u8; 32];
+        let subject = [2u8; 32];
+        let secret = scalar(9);
+        let compressed = public_key_for_secret(&secret);
+
+        let (node_r, node_s) = sign_pop(&program_id, &subject, &compressed, &secret, &scalar(13));
+        assert_eq!(
+            validate_provider_key_and_verify_pop(
+                &program_id,
+                &subject,
+                &compressed,
+                &node_r,
+                &node_s
+            ),
+            Err(NodePopError::InvalidProof)
+        );
+
+        let message = derive_provider_pop_message(&program_id, &subject);
+        let (provider_r, provider_s) =
+            sign_pop_message(&message, &compressed, &secret, &scalar(13));
+        assert_eq!(
+            validate_key_and_verify_pop(
+                &program_id,
+                &subject,
+                &compressed,
+                &provider_r,
+                &provider_s
+            ),
+            Err(NodePopError::InvalidProof)
         );
     }
 }

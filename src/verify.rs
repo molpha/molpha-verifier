@@ -280,8 +280,10 @@ mod tests {
         RegistryView {
             version: REGISTRY_VERSION,
             node_count: REGISTERED_NODE_COUNT as u16,
+            provider_count: 0,
             redundancy_buffer: REDUNDANCY_BUFFER,
             nodes,
+            providers: &[],
         }
     }
 

@@ -62,8 +62,10 @@ fn main() -> Result<(), AttestationError> {
     let registry = molpha_verifier::RegistryView {
         version: fixtures::REGISTRY_VERSION,
         node_count: fixtures::REGISTERED_NODE_COUNT as u16,
+        provider_count: 0,
         redundancy_buffer: fixtures::REDUNDANCY_BUFFER,
         nodes: &nodes,
+        providers: &[],
     };
     verify(&attestation, &registry, None)?;
 

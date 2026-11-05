@@ -10,16 +10,19 @@ use std::collections::BTreeMap;
 
 use molpha_verifier::{
     coalition_key, resolve_signers, verify, verify_provenance, Attestation, AttestationError,
-    AttestationPayload, NodeEntry, RegistryView, SchnorrSignature,
+    AttestationPayload, NodeEntry, RegistryView, SchnorrSignature, PROVIDER_BIT_BASE,
 };
 
 const VECTORS: &str = include_str!("fixtures/provider_bits.vectors");
 const REDUNDANCY_BUFFER: u8 = 2;
 
+/// A registry of the vectors: node slot `i` is `nodes[i]` (bit `i`), provider slot `p` is
+/// `providers[p]` (bit `PROVIDER_BIT_BASE + p`).
 struct Registry {
     version: u32,
     buffer: u8,
-    table: Vec<NodeEntry>,
+    nodes: Vec<NodeEntry>,
+    providers: Vec<NodeEntry>,
 }
 
 struct Case {
@@ -76,7 +79,6 @@ fn parse() -> Vectors {
         registries: BTreeMap::new(),
         cases: Vec::new(),
     };
-    let mut counts = BTreeMap::new();
     for line in VECTORS
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -96,25 +98,31 @@ fn parse() -> Vectors {
                 vectors.providers.insert(f[1].parse().unwrap(), unhex(f[2]));
             }
             "registry" => {
-                let count: usize = f[4].parse().unwrap();
-                counts.insert(f[1].to_string(), count);
+                let node_count: usize = f[4].parse().unwrap();
+                let provider_count: usize = f[5].parse().unwrap();
                 vectors.registries.insert(
                     f[1].to_string(),
                     Registry {
                         version: f[2].parse().unwrap(),
                         buffer: f[3].parse().unwrap(),
-                        table: vec![NodeEntry::default(); count],
+                        nodes: vec![NodeEntry::default(); node_count],
+                        providers: vec![NodeEntry::default(); provider_count],
                     },
                 );
             }
             "record" => {
                 let registry = vectors.registries.get_mut(f[1]).unwrap();
-                let index: usize = f[2].parse().unwrap();
-                registry.table[index] = NodeEntry {
+                let bit: usize = f[2].parse().unwrap();
+                let entry = NodeEntry {
                     account: unhex(f[3]),
                     x: unhex(f[4]),
                     y: unhex(f[5]),
                 };
+                if bit < PROVIDER_BIT_BASE {
+                    registry.nodes[bit] = entry;
+                } else {
+                    registry.providers[bit - PROVIDER_BIT_BASE] = entry;
+                }
             }
             "case" => vectors.cases.push(Case {
                 name: f[1].to_string(),
@@ -131,10 +139,12 @@ fn parse() -> Vectors {
         }
     }
     for (name, registry) in &vectors.registries {
-        assert!(
-            !registry.table.last().unwrap().is_vacant(),
-            "{name}: trailing holes are never stored"
-        );
+        for table in [&registry.nodes, &registry.providers] {
+            assert!(
+                table.last().is_none_or(|last| !last.is_vacant()),
+                "{name}: trailing holes are never stored"
+            );
+        }
         assert_eq!(registry.buffer, REDUNDANCY_BUFFER);
     }
     vectors
@@ -143,9 +153,11 @@ fn parse() -> Vectors {
 fn view(registry: &Registry) -> RegistryView<'_> {
     RegistryView {
         version: registry.version,
-        node_count: registry.table.len() as u16,
+        node_count: registry.nodes.len() as u16,
+        provider_count: registry.providers.len() as u16,
         redundancy_buffer: registry.buffer,
-        nodes: &registry.table,
+        nodes: &registry.nodes,
+        providers: &registry.providers,
     }
 }
 
@@ -310,7 +322,7 @@ fn provider_accounts_are_the_program_pdas() {
     }
 }
 
-/// The same vectors through the account path: a `Registry` account holding the table, and the
+/// The same vectors through the account path: a `Registry` account holding the two tables, and the
 /// provider PDA derived from the ID the source names.
 #[cfg(feature = "solana")]
 mod account_path {
@@ -324,15 +336,17 @@ mod account_path {
     use solana_pubkey::Pubkey;
 
     /// Registry bytes in the program's layout: discriminator, `grace_active_until` and
-    /// `active_from` (i64), `version` (u32), `node_count` (u16), `redundancy_buffer` and `bump`,
-    /// then the table.
+    /// `active_from` (i64), `version` (u32), `node_count` and `provider_count` (u8),
+    /// `redundancy_buffer` and `bump`, then the node table and the provider table.
     fn registry_data(registry: &Registry) -> Vec<u8> {
-        let mut data = vec![0u8; registry_account_len(registry.table.len())];
+        let records = registry.nodes.len() + registry.providers.len();
+        let mut data = vec![0u8; registry_account_len(records)];
         data[..DISCRIMINATOR_LEN].copy_from_slice(&REGISTRY_DISCRIMINATOR);
         data[24..28].copy_from_slice(&registry.version.to_le_bytes());
-        data[28..30].copy_from_slice(&(registry.table.len() as u16).to_le_bytes());
+        data[28] = registry.nodes.len() as u8;
+        data[29] = registry.providers.len() as u8;
         data[30] = registry.buffer;
-        for (index, entry) in registry.table.iter().enumerate() {
+        for (index, entry) in registry.nodes.iter().chain(&registry.providers).enumerate() {
             let offset = REGISTRY_NODES_OFFSET + index * REGISTRY_MEMBER_LEN;
             data[offset..offset + 32].copy_from_slice(&entry.account);
             data[offset + 32..offset + 64].copy_from_slice(&entry.x);

@@ -61,8 +61,10 @@ fn derive_selection_bitmap_sweep_digest_is_stable() {
                     let registry = RegistryView {
                         version: registry_version,
                         node_count: node_count as u16,
+                        provider_count: 0,
                         redundancy_buffer,
                         nodes: &[],
+                        providers: &[],
                     };
                     let got = derive_selection_bitmap(
                         &source_id,
@@ -139,23 +141,32 @@ fn view_for<'a>(
     buffer: u8,
     table: &'a mut Vec<NodeEntry>,
 ) -> RegistryView<'a> {
+    // Bit `i` of `live` is record `i` of the vectors: node slots below 64, provider records from
+    // 64 (which selection never draws). The view stores them as two tables, nodes then providers.
     let live = molpha_verifier::Bitmap::load(live);
-    let last = (0..256).rev().find(|slot| live.bit_set(*slot)).unwrap();
-    *table = (0..=last)
-        .map(|slot| NodeEntry {
-            account: if live.bit_set(slot) {
-                [(slot % 255) as u8 + 1; 32]
-            } else {
-                [0; 32]
-            },
-            ..NodeEntry::default()
-        })
+    let record = |slot: usize| NodeEntry {
+        account: if live.bit_set(slot) {
+            [(slot % 255) as u8 + 1; 32]
+        } else {
+            [0; 32]
+        },
+        ..NodeEntry::default()
+    };
+    let last = |range: core::ops::Range<usize>| range.rev().find(|slot| live.bit_set(*slot));
+    let node_count = last(0..64).map_or(0, |slot| slot + 1);
+    let provider_count = last(64..256).map_or(0, |slot| slot - 64 + 1);
+    *table = (0..node_count)
+        .chain(64..64 + provider_count)
+        .map(record)
         .collect();
+    let (nodes, providers) = table.split_at(node_count);
     RegistryView {
         version,
-        node_count: table.len() as u16,
+        node_count: node_count as u16,
+        provider_count: provider_count as u16,
         redundancy_buffer: buffer,
-        nodes: table,
+        nodes,
+        providers,
     }
 }
 

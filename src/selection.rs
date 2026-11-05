@@ -53,7 +53,7 @@ pub fn derive_selection_bitmap(
     let selection_size =
         effective_selection_size(signatures_required, registry.redundancy_buffer, live_count);
     let ranks = derive_group_bitmap(&selection_seed, live_count, selection_size)?;
-    // No node hole below the last node slot: the ranks are the slots. Records past `NODE_SLOTS`
+    // No node hole below the last node slot: the ranks are the slots. Node slots past `NODE_SLOTS`
     // are providers, so they do not count toward the dense prefix.
     if live_count == u32::from(registry.node_count).min(NODE_SLOTS as u32) {
         return Ok(ranks);
@@ -141,8 +141,13 @@ pub fn verify_selection(
     let signers = Bitmap::load(signers_bitmap);
     check_quorum(&signers, signatures_required)?;
 
-    let expected_selection_bitmap =
-        attestation_selection(source_id, timestamp, signatures_required, &signers, registry)?;
+    let expected_selection_bitmap = attestation_selection(
+        source_id,
+        timestamp,
+        signatures_required,
+        &signers,
+        registry,
+    )?;
     Ok(signers.node_bits().is_subset(&expected_selection_bitmap))
 }
 
@@ -160,8 +165,10 @@ mod tests {
         RegistryView {
             version,
             node_count,
+            provider_count: 0,
             redundancy_buffer: 2,
             nodes: &[],
+            providers: &[],
         }
     }
 
@@ -212,8 +219,10 @@ mod tests {
         RegistryView {
             version,
             node_count: nodes.len() as u16,
+            provider_count: 0,
             redundancy_buffer: buffer,
             nodes,
+            providers: &[],
         }
     }
 
@@ -230,8 +239,10 @@ mod tests {
         RegistryView {
             version,
             node_count,
+            provider_count: 0,
             redundancy_buffer: 2,
             nodes: &[],
+            providers: &[],
         }
     }
 
@@ -283,16 +294,30 @@ mod tests {
         }
     }
 
-    /// The nodes of `live` as a table, followed by live provider records at the given provider
-    /// slots (index `64 + slot`).
-    fn with_providers(live: &[bool], provider_slots: &[usize]) -> Vec<crate::NodeEntry> {
-        let mut table = members(live);
-        table.resize(NODE_SLOTS, crate::NodeEntry::default());
+    /// A provider table with live records at the given provider slots and holes elsewhere.
+    fn providers(provider_slots: &[usize]) -> Vec<crate::NodeEntry> {
+        let mut table = Vec::new();
         for slot in provider_slots {
-            table.resize(NODE_SLOTS + slot + 1, crate::NodeEntry::default());
-            table[NODE_SLOTS + slot].account = [0xA0 + *slot as u8; 32];
+            if table.len() <= *slot {
+                table.resize(slot + 1, crate::NodeEntry::default());
+            }
+            table[*slot].account = [0xA0 + *slot as u8; 32];
         }
         table
+    }
+
+    /// [`view`] with a provider table beside the nodes.
+    fn with_providers<'a>(
+        version: u32,
+        nodes: &'a [crate::NodeEntry],
+        providers: &'a [crate::NodeEntry],
+        buffer: u8,
+    ) -> RegistryView<'a> {
+        RegistryView {
+            provider_count: providers.len() as u16,
+            providers,
+            ..view(version, nodes, buffer)
+        }
     }
 
     #[test]
@@ -304,14 +329,19 @@ mod tests {
             holey[hole] = false;
         }
         let full = [true; NODE_SLOTS];
+        let table = providers(&[1, 2, 40]);
         for live in [&dense[..], &holey[..], &full[..]] {
             let nodes = members(live);
-            let with = with_providers(live, &[1, 2, 40]);
             for w in 0..32u64 {
                 let source = [w as u8; 32];
                 let timestamp = (1_700_000_000 + w) * SELECTION_WINDOW_MS;
                 let without = derive_selection_bitmap(&source, timestamp, 5, &view(7, &nodes, 2));
-                let got = derive_selection_bitmap(&source, timestamp, 5, &view(7, &with, 2));
+                let got = derive_selection_bitmap(
+                    &source,
+                    timestamp,
+                    5,
+                    &with_providers(7, &nodes, &table, 2),
+                );
                 assert_eq!(got.unwrap().to_bytes(), without.unwrap().to_bytes());
             }
         }
@@ -319,11 +349,15 @@ mod tests {
 
     #[test]
     fn no_node_hole_below_the_providers_takes_the_dense_draw() {
-        // 64 live nodes and a provider: `node_count` is 66, but the ranks are still the slots.
-        let table = with_providers(&[true; NODE_SLOTS], &[1]);
-        assert_eq!(table.len(), 66);
-        let got = derive_selection_bitmap(&[2; 32], 1_700_000_000_000, 5, &view(1, &table, 2));
+        // 64 live nodes and a provider: the ranks are still the slots.
         let dense = members(&[true; NODE_SLOTS]);
+        let table = providers(&[1]);
+        let got = derive_selection_bitmap(
+            &[2; 32],
+            1_700_000_000_000,
+            5,
+            &with_providers(1, &dense, &table, 2),
+        );
         let want = derive_selection_bitmap(&[2; 32], 1_700_000_000_000, 5, &view(1, &dense, 2));
         assert_eq!(got.unwrap().to_bytes(), want.unwrap().to_bytes());
         assert_eq!(want.unwrap().popcount(), 7);
@@ -331,17 +365,26 @@ mod tests {
 
     #[test]
     fn a_selection_never_reaches_the_provider_bits() {
-        let table = with_providers(&[true; 30], &[1, 2]);
+        let nodes = members(&[true; 30]);
+        let table = providers(&[1, 2]);
         for w in 0..64u64 {
-            let got = derive_selection_bitmap(&[w as u8; 32], w * 1_000, 5, &view(1, &table, 2));
+            let got = derive_selection_bitmap(
+                &[w as u8; 32],
+                w * 1_000,
+                5,
+                &with_providers(1, &nodes, &table, 2),
+            );
             assert_eq!(got.unwrap().node_bits(), got.unwrap());
         }
-        // Even a selection-only caller that claims more records than nodes draws over node slots.
+        // Even a selection-only caller that claims more node slots than the segment has draws
+        // over the first 64.
         let claimed = RegistryView {
             version: 1,
             node_count: 200,
+            provider_count: 0,
             redundancy_buffer: 2,
             nodes: &[],
+            providers: &[],
         };
         let got = derive_selection_bitmap(&[9; 32], 5_000, 5, &claimed).unwrap();
         assert_eq!(got.node_bits(), got);
@@ -475,13 +518,17 @@ mod tests {
                 Err(AttestationError::InsufficientSigners)
             );
         }
-        assert!(found > 0, "no window where the smaller draw leaves the larger one");
+        assert!(
+            found > 0,
+            "no window where the smaller draw leaves the larger one"
+        );
     }
 
     #[test]
     fn verify_selection_draws_a_provider_round_by_its_node_quorum() {
-        let nodes = with_providers(&[true; 12], &[1]);
-        let registry = view(3, &nodes, 2);
+        let nodes = members(&[true; 12]);
+        let table = providers(&[1]);
+        let registry = with_providers(3, &nodes, &table, 2);
         let ts = 1_705_257_421_000;
         // t = 5 with the provider: four nodes, so the committee is 4 + 2 buffer.
         let selection = derive_selection_bitmap(&[7; 32], ts, 4, &registry).unwrap();

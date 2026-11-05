@@ -47,7 +47,9 @@ use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
 use crate::{
-    onchain::verify_aggregate_over_hash_resolved, state::MAX_REGISTRY_NODES, verify::verify,
+    onchain::verify_aggregate_over_hash_resolved,
+    state::{MAX_PROVIDER_SLOTS, MAX_REGISTRY_NODES, NODE_SLOTS},
+    verify::verify,
     Attestation, AttestationError, CoalitionKey, NodeEntry, RegistryView, SchnorrSignature,
 };
 
@@ -70,23 +72,26 @@ pub const REGISTRY_HEADER_LEN: usize = 32;
 /// secp256k1 `x` and `y`.
 pub const REGISTRY_MEMBER_LEN: usize = NodeEntry::LEN;
 
-/// Serialized `Registry` account length, including the discriminator, for a member table of
-/// `capacity` records.
+/// Serialized `Registry` account length, including the discriminator, for `capacity` records:
+/// the node table and the provider table together.
 pub const fn registry_account_len(capacity: usize) -> usize {
     REGISTRY_HEADER_LEN + capacity * REGISTRY_MEMBER_LEN
 }
 
 // Registry is zero_copy / repr(C). After the 8-byte discriminator:
-// grace_active_until(i64), active_from(i64), version(u32), node_count(u16),
-// redundancy_buffer(u8), bump(u8), then members[capacity].
+// grace_active_until(i64), active_from(i64), version(u32), node_count(u8), provider_count(u8),
+// redundancy_buffer(u8), bump(u8), then nodes[node_count], providers[provider_count] and any
+// spare capacity. A snapshot without providers has the bytes of the earlier layout, whose
+// node_count was a u16 at the same offset.
 const REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET: usize = DISCRIMINATOR_LEN;
 const REGISTRY_ACTIVE_FROM_OFFSET: usize = REGISTRY_GRACE_ACTIVE_UNTIL_OFFSET + 8;
 const REGISTRY_VERSION_OFFSET: usize = REGISTRY_ACTIVE_FROM_OFFSET + 8;
 const REGISTRY_NODE_COUNT_OFFSET: usize = REGISTRY_VERSION_OFFSET + 4;
-const REGISTRY_REDUNDANCY_BUFFER_OFFSET: usize = REGISTRY_NODE_COUNT_OFFSET + 2;
+const REGISTRY_PROVIDER_COUNT_OFFSET: usize = REGISTRY_NODE_COUNT_OFFSET + 1;
+const REGISTRY_REDUNDANCY_BUFFER_OFFSET: usize = REGISTRY_PROVIDER_COUNT_OFFSET + 1;
 const REGISTRY_BUMP_OFFSET: usize = REGISTRY_REDUNDANCY_BUFFER_OFFSET + 1;
 
-/// Offset of the first member record.
+/// Offset of the first node record. The provider table follows the `node_count` node records.
 pub const REGISTRY_NODES_OFFSET: usize = REGISTRY_BUMP_OFFSET + 1;
 
 const _: () = assert!(REGISTRY_NODES_OFFSET == REGISTRY_HEADER_LEN);
@@ -95,8 +100,8 @@ pub const PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("dzemhcTeUnUEhDcyUssWP8GfcMCYwKezVg4U1hvdEJe");
 
 /// The `Provider` PDA of the provider with stable ID `id`: `["molpha_provider", u32le id]` under
-/// [`PROGRAM_ID`]. It is the `account` of that provider's registry record (table index
-/// `64 + slot`), and so what a provenance requirement binds to.
+/// [`PROGRAM_ID`]. It is the `account` of that provider's registry record (provider slot `slot`,
+/// bit `64 + slot`), and so what a provenance requirement binds to.
 pub fn provider_account(id: u32) -> Pubkey {
     Pubkey::find_program_address(
         &[PROVIDER_SEED_PREFIX, id.to_le_bytes().as_ref()],
@@ -193,14 +198,13 @@ impl<'a> RegistryAccount<'a> {
         }
         let table_len = data.len() - REGISTRY_NODES_OFFSET;
         let capacity = table_len / REGISTRY_MEMBER_LEN;
-        let node_count = u16::from_le_bytes(
-            data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
-                .try_into()
-                .expect("length checked above"),
-        );
+        let node_count = usize::from(data[REGISTRY_NODE_COUNT_OFFSET]);
+        let provider_count = usize::from(data[REGISTRY_PROVIDER_COUNT_OFFSET]);
         if !table_len.is_multiple_of(REGISTRY_MEMBER_LEN)
             || capacity > MAX_REGISTRY_NODES
-            || usize::from(node_count) > capacity
+            || node_count > NODE_SLOTS
+            || provider_count > MAX_PROVIDER_SLOTS
+            || node_count + provider_count > capacity
         {
             return Err(AccountError::InvalidRegistryAccount);
         }
@@ -223,12 +227,14 @@ impl<'a> RegistryAccount<'a> {
         )
     }
 
+    /// Node slots, holes included (at most [`NODE_SLOTS`]).
     pub fn node_count(&self) -> u16 {
-        u16::from_le_bytes(
-            self.data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
-                .try_into()
-                .expect("length checked in load"),
-        )
+        u16::from(self.data[REGISTRY_NODE_COUNT_OFFSET])
+    }
+
+    /// Provider slots, holes included (at most [`MAX_PROVIDER_SLOTS`]).
+    pub fn provider_count(&self) -> u16 {
+        u16::from(self.data[REGISTRY_PROVIDER_COUNT_OFFSET])
     }
 
     pub fn redundancy_buffer(&self) -> u8 {
@@ -275,18 +281,28 @@ impl<'a> RegistryAccount<'a> {
         &self.data
     }
 
-    /// Full ordered member table, viewed in place; only `[..node_count()]` is populated.
+    /// The node slots, `node_count()` records, viewed in place.
     pub fn nodes(&self) -> &[NodeEntry] {
-        NodeEntry::slice_from_bytes(&self.data[REGISTRY_NODES_OFFSET..])
-            .expect("member table is a whole number of records, checked in load")
+        let end = REGISTRY_NODES_OFFSET + usize::from(self.node_count()) * REGISTRY_MEMBER_LEN;
+        NodeEntry::slice_from_bytes(&self.data[REGISTRY_NODES_OFFSET..end])
+            .expect("the node table fits the account, checked in load")
     }
 
-    /// Account address of the live member in slot `index`; a hole is an invalid index.
+    /// The provider slots, `provider_count()` records after the node table, viewed in place:
+    /// provider slot `p` (bit `64 + p`) is `providers()[p]`.
+    pub fn providers(&self) -> &[NodeEntry] {
+        let start = REGISTRY_NODES_OFFSET + usize::from(self.node_count()) * REGISTRY_MEMBER_LEN;
+        let end = start + usize::from(self.provider_count()) * REGISTRY_MEMBER_LEN;
+        NodeEntry::slice_from_bytes(&self.data[start..end])
+            .expect("the provider table fits the account, checked in load")
+    }
+
+    /// Account address of the live node in node slot `index`; a hole is an invalid index.
     pub fn node_key(&self, index: usize) -> Result<Pubkey, AccountError> {
-        if index >= usize::from(self.node_count()) || self.nodes()[index].is_vacant() {
-            return Err(AttestationError::InvalidNodeIndex.into());
+        match self.nodes().get(index) {
+            Some(node) if !node.is_vacant() => Ok(Pubkey::new_from_array(node.account)),
+            _ => Err(AttestationError::InvalidNodeIndex.into()),
         }
-        Ok(Pubkey::new_from_array(self.nodes()[index].account))
     }
 
     /// Framework-agnostic view for selection and verification.
@@ -294,8 +310,10 @@ impl<'a> RegistryAccount<'a> {
         RegistryView {
             version: self.version(),
             node_count: self.node_count(),
+            provider_count: self.provider_count(),
             redundancy_buffer: self.redundancy_buffer(),
             nodes: self.nodes(),
+            providers: self.providers(),
         }
     }
 }
@@ -306,6 +324,7 @@ impl core::fmt::Debug for RegistryAccount<'_> {
             .field("key", &self.key)
             .field("version", &self.version())
             .field("node_count", &self.node_count())
+            .field("provider_count", &self.provider_count())
             .field("redundancy_buffer", &self.redundancy_buffer())
             .field("bump", &self.bump())
             .finish_non_exhaustive()
@@ -402,6 +421,7 @@ mod tests {
         SIGNATURES_REQUIRED, SIGNERS_BITMAP, SOURCE_ID, TIMESTAMP, VALUE,
     };
     use crate::payload::AttestationPayload;
+    use crate::state::PROVIDER_BIT_BASE;
 
     /// The program sizes a snapshot to its members: the table holds exactly `node_count`.
     const EXACT_FIT: usize = REGISTERED_NODE_COUNT as usize;
@@ -429,8 +449,8 @@ mod tests {
         data[..DISCRIMINATOR_LEN].copy_from_slice(&REGISTRY_DISCRIMINATOR);
         data[REGISTRY_VERSION_OFFSET..REGISTRY_VERSION_OFFSET + 4]
             .copy_from_slice(&version.to_le_bytes());
-        data[REGISTRY_NODE_COUNT_OFFSET..REGISTRY_NODE_COUNT_OFFSET + 2]
-            .copy_from_slice(&(REGISTERED_NODE_COUNT as u16).to_le_bytes());
+        data[REGISTRY_NODE_COUNT_OFFSET] = REGISTERED_NODE_COUNT as u8;
+        data[REGISTRY_PROVIDER_COUNT_OFFSET] = 0;
         data[REGISTRY_REDUNDANCY_BUFFER_OFFSET] = REDUNDANCY_BUFFER;
         data[REGISTRY_BUMP_OFFSET] = bump;
         for (index, (x, y)) in PUBKEYS.iter().enumerate().take(capacity) {
@@ -522,8 +542,10 @@ mod tests {
 
     #[test]
     fn layout_constants_match_the_program_registry() {
-        // 8 discriminator + grace(8) + active_from(8) + version(4) + node_count(2) + buffer(1)
-        // + bump(1), then 96-byte records.
+        // 8 discriminator + grace(8) + active_from(8) + version(4) + node_count(1)
+        // + provider_count(1) + buffer(1) + bump(1), then 96-byte records.
+        assert_eq!(REGISTRY_NODE_COUNT_OFFSET, 28);
+        assert_eq!(REGISTRY_PROVIDER_COUNT_OFFSET, 29);
         assert_eq!(REGISTRY_NODES_OFFSET, 32);
         assert_eq!(REGISTRY_MEMBER_LEN, 96);
         assert_eq!(registry_account_len(0), 32);
@@ -543,7 +565,9 @@ mod tests {
         assert_eq!(view.version, REGISTRY_VERSION);
         assert_eq!(view.node_count, REGISTERED_NODE_COUNT as u16);
         assert_eq!(view.redundancy_buffer, REDUNDANCY_BUFFER);
-        assert_eq!(view.nodes.len(), SPARE_CAPACITY);
+        // The tables are the counted slots; spare capacity belongs to neither.
+        assert_eq!(view.nodes.len(), REGISTERED_NODE_COUNT as usize);
+        assert_eq!((view.provider_count, view.providers.len()), (0, 0));
         for (index, node) in view.nodes.iter().enumerate() {
             let offset = REGISTRY_NODES_OFFSET + index * REGISTRY_MEMBER_LEN;
             assert_eq!(node.account[..], data[offset..offset + 32]);
@@ -559,10 +583,68 @@ mod tests {
             assert_eq!(node.account, node_account(index));
             assert_eq!(node.xy(), PUBKEYS[index]);
         }
+    }
+
+    /// `nodes` node records then `providers` provider records, each `(account byte, live)`.
+    fn two_segment_data(nodes: &[Option<u8>], providers: &[Option<u8>]) -> Vec<u8> {
+        let mut data = registry_account_data(REGISTRY_VERSION, nodes.len() + providers.len());
+        data[REGISTRY_NODE_COUNT_OFFSET] = nodes.len() as u8;
+        data[REGISTRY_PROVIDER_COUNT_OFFSET] = providers.len() as u8;
+        for (index, record) in nodes.iter().chain(providers).enumerate() {
+            let offset = REGISTRY_NODES_OFFSET + index * REGISTRY_MEMBER_LEN;
+            let fill = record.map_or([0u8; 96], |byte| [byte; 96]);
+            data[offset..offset + REGISTRY_MEMBER_LEN].copy_from_slice(&fill);
+        }
+        data
+    }
+
+    #[test]
+    fn the_provider_table_follows_the_node_table() {
+        // Three nodes, provider slot 0 reserved (a hole), a provider at slot 1: five records.
+        let mut accounts = Accounts::new();
+        accounts.registry_data = two_segment_data(&[Some(1), Some(2), Some(3)], &[None, Some(9)]);
+        assert_eq!(accounts.registry_data.len(), registry_account_len(5));
+        let info = accounts.registry();
+        let registry = RegistryAccount::load(&info).unwrap();
+        let view = registry.view();
+        assert_eq!((view.node_count, view.provider_count), (3, 2));
+        assert_eq!(registry.providers()[1].account, [9; 32]);
+        assert_eq!(view.signer(2).unwrap().account, [3; 32]);
+        assert_eq!(view.signer(PROVIDER_BIT_BASE + 1).unwrap().account, [9; 32]);
+        // Bit 3 is past the node table, though the record after node 2 exists (it is a provider's).
+        assert!(view.signer(3).is_err());
+        assert!(view.signer(PROVIDER_BIT_BASE).is_err());
+        assert!(view.signer(PROVIDER_BIT_BASE + 2).is_err());
+        assert_eq!(view.live_slots().as_slice(), &[0, 1, 2]);
+        assert!(registry.node_key(3).is_err());
+    }
+
+    #[test]
+    fn segment_counts_are_bounded_by_the_bitmap_and_the_table() {
+        let load = |data: Vec<u8>| {
+            let mut accounts = Accounts::new();
+            accounts.registry_data = data;
+            let info = accounts.registry();
+            RegistryAccount::load(&info).map(|_| ())
+        };
+        // More node slots than the node segment has bits.
+        let mut data = two_segment_data(&[Some(1); 65], &[]);
         assert_eq!(
-            view.nodes[REGISTERED_NODE_COUNT as usize],
-            NodeEntry::default()
+            load(data.clone()),
+            Err(AccountError::InvalidRegistryAccount)
         );
+        data[REGISTRY_NODE_COUNT_OFFSET] = 64;
+        assert_eq!(load(data), Ok(()));
+        // More provider slots than the provider segment has bits.
+        let mut data = two_segment_data(&[], &[Some(1); 192]);
+        assert_eq!(load(data.clone()), Ok(()));
+        data[REGISTRY_PROVIDER_COUNT_OFFSET] = 193;
+        data.extend_from_slice(&[1u8; 96]);
+        assert_eq!(load(data), Err(AccountError::InvalidRegistryAccount));
+        // Together the counts must fit the table.
+        let mut data = two_segment_data(&[Some(1); 3], &[None, Some(2)]);
+        data[REGISTRY_PROVIDER_COUNT_OFFSET] = 3;
+        assert_eq!(load(data), Err(AccountError::InvalidRegistryAccount));
     }
 
     #[test]

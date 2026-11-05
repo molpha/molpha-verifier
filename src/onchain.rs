@@ -78,8 +78,10 @@ mod tests {
         RegistryView {
             version: REGISTRY_VERSION,
             node_count: REGISTERED_NODE_COUNT as u16,
+            provider_count: 0,
             redundancy_buffer: REDUNDANCY_BUFFER,
             nodes,
+            providers: &[],
         }
     }
 
@@ -134,8 +136,10 @@ mod tests {
         let registry = RegistryView {
             version: 0,
             node_count: 4,
+            provider_count: 0,
             redundancy_buffer: 0,
             nodes: &nodes,
+            providers: &[],
         };
         let mut bm = Bitmap::EMPTY;
         bm.set_bit(2);

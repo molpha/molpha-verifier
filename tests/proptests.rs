@@ -258,8 +258,10 @@ proptest! {
         let registry = RegistryView {
             version: registry_version,
             node_count: node_count as u16,
+            provider_count: 0,
             redundancy_buffer,
             nodes: &[],
+            providers: &[],
         };
         let a = derive_selection_bitmap(
             &source_id,

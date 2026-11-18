@@ -37,6 +37,7 @@ pub mod fixtures {
 pub mod bitmap;
 pub mod coalition;
 pub mod error;
+pub mod inconclusive;
 pub mod message;
 pub mod onchain;
 pub mod partial;
@@ -70,6 +71,7 @@ pub use verify::{
 
 pub use bitmap::{derive_group_bitmap, effective_selection_size, for_each_set_bit, Bitmap};
 pub use coalition::{CoalitionAccumulator, CoalitionKey};
+pub use inconclusive::{inconclusive_id, read_outcome, Outcome, INCONCLUSIVE_TAG};
 pub use message::{compute_message_hash, MESSAGE_PREFIX};
 pub use scalar::{
     eth_address_from_uncompressed_pubkey, evm_schnorr_ecdsa_inputs,
